@@ -1,0 +1,11 @@
+[package]
+name = "foxtrot-ffi"
+version = "0.1.0"
+edition = "2018"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+step = { path = "../foxtrot/step" }
+triangulate = { path = "../foxtrot/triangulate" }

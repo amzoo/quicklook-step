@@ -1,0 +1,27 @@
+# Rust
+target/
+foxtrot-ffi/target/
+
+# Xcode
+build/
+DerivedData/
+*.xcuserdata
+*.xcworkspace/xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.moved-aside
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Build artifacts
+*.a
+include/
+
+# Example files
+example-steps/
