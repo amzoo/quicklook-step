@@ -1,1 +1,0 @@
-../pkg/wasm.js

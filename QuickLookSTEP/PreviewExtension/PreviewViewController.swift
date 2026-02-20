@@ -1,11 +1,8 @@
-import Cocoa
+import AppKit
 import QuickLookUI
 import SceneKit
 
 class PreviewViewController: NSViewController, QLPreviewingController {
-    override func viewDidLoad() {
-        super.viewDidLoad()
-    }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         do {
@@ -16,7 +13,7 @@ class PreviewViewController: NSViewController, QLPreviewingController {
             scnView.scene = scene
             scnView.allowsCameraControl = true
             scnView.autoenablesDefaultLighting = false
-            scnView.backgroundColor = NSColor(red: 0.12, green: 0.14, blue: 0.19, alpha: 1.0)
+            scnView.backgroundColor = STEPSceneBuilder.Style.backgroundColor
             self.view.addSubview(scnView)
 
             handler(nil)

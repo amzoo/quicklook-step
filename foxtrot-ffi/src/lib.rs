@@ -13,9 +13,6 @@ pub struct FFIVertex {
     pub nx: f32,
     pub ny: f32,
     pub nz: f32,
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
 }
 
 #[repr(C)]
@@ -63,9 +60,6 @@ pub extern "C" fn foxtrot_parse_step_file(path: *const c_char) -> *mut FFIMesh {
             nx: v.norm.x as f32,
             ny: v.norm.y as f32,
             nz: v.norm.z as f32,
-            r: v.color.x as f32,
-            g: v.color.y as f32,
-            b: v.color.z as f32,
         });
     }
 
