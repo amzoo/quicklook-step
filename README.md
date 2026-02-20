@@ -10,14 +10,23 @@ Built with [foxtrot](https://github.com/Formlabs/foxtrot) (Rust STEP parser + tr
 - **Finder thumbnails** — rendered 3D thumbnails for STEP files
 - Universal binary (Apple Silicon + Intel)
 
-## Requirements
+## Install
+
+1. Download `QuickLookSTEP.zip` from the [latest release](https://github.com/amzoo/quicklook-step/releases/latest)
+2. Unzip and move `QuickLookSTEP.app` to `/Applications`
+3. Right-click the app → **Open**, then click **Open** in the dialog (required once since the app is not notarized)
+4. Press Space on any `.step` or `.stp` file in Finder to preview it
+
+## Building from Source
+
+### Requirements
 
 - macOS 13.0+
 - Rust toolchain (`rustup`)
 - Xcode 14+
 - `cbindgen` (`cargo install cbindgen`)
 
-## Building
+### Steps
 
 1. Build the Rust static library:
 
