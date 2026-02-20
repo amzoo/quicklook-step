@@ -52,7 +52,6 @@ QuickLookSTEP/
   QuickLookSTEP/      — Host app (SwiftUI)
   PreviewExtension/   — QLPreviewingController (interactive 3D preview)
   Shared/             — STEPSceneBuilder (FFI mesh → SceneKit)
-example-steps/    — Sample STEP files for testing
 ```
 
 ## License
