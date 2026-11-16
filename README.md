@@ -39,7 +39,7 @@ bash build-rust.sh
 2. Build the app and extensions in Xcode:
 
 ```bash
-xcodebuild -project QuickLookSTEP/QuickLookSTEP.xcodeproj -scheme QuickLookSTEP build
+xcodebuild -project QuickLookSTEP/QuickLookSTEP.xcodeproj -scheme QuickLookSTEP -configuration Release ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO build
 ```
 
 Or open `QuickLookSTEP/QuickLookSTEP.xcodeproj` in Xcode and build from there.
