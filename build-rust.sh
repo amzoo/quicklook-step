@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/foxtrot-ffi"
 
+echo "Ensuring Rust targets are installed..."
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
 echo "Building for aarch64-apple-darwin..."
 cargo build --release --target aarch64-apple-darwin
 

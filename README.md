@@ -34,6 +34,8 @@ Built with [foxtrot](https://github.com/Formlabs/foxtrot) (Rust STEP parser + tr
 bash build-rust.sh
 ```
 
+`build-rust.sh` automatically installs the `aarch64-apple-darwin` and `x86_64-apple-darwin` Rust targets via `rustup` (needed for the universal binary).
+
 2. Build the app and extensions in Xcode:
 
 ```bash
