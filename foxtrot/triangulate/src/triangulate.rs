@@ -322,11 +322,36 @@ fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, 
     let location = cartesian_point(s, a.location);
     // TODO: this doesn't necessarily match the behavior of `build_axes`
     let axis = direction(s, a.axis.expect("Missing axis"));
-    let ref_direction = match a.ref_direction {
-        None => DVec3::new(1.0, 0.0, 0.0),
-        Some(r) => direction(s, r),
-    };
+    let ref_direction = build_ref_direction(axis, a.ref_direction.map(|r| direction(s, r)));
     (location, axis, ref_direction)
+}
+
+/// Builds a unit reference direction perpendicular to `axis`, following the
+/// STEP definition of `axis2_placement_3d`: the reference direction is
+/// projected onto the plane normal to the axis.  If it is omitted (or is
+/// parallel to the axis), any perpendicular direction is valid, so we pick the
+/// world axis least aligned with `axis` to stay numerically stable.
+fn build_ref_direction(axis: DVec3, ref_direction: Option<DVec3>) -> DVec3 {
+    const EPS: f64 = 1e-9;
+    let axis_n = if axis.norm() > EPS { axis.normalize() } else { axis };
+    let project = |v: DVec3| v - axis_n * v.dot(&axis_n);
+
+    if let Some(r) = ref_direction {
+        let p = project(r);
+        if p.norm() > EPS {
+            return p.normalize();
+        }
+    }
+    let a = axis_n.abs();
+    let least = if a.x <= a.y && a.x <= a.z {
+        DVec3::new(1.0, 0.0, 0.0)
+    } else if a.y <= a.z {
+        DVec3::new(0.0, 1.0, 0.0)
+    } else {
+        DVec3::new(0.0, 0.0, 1.0)
+    };
+    let p = project(least);
+    if p.norm() > EPS { p.normalize() } else { least }
 }
 
 fn shell(s: &StepFile, c: Shell, mesh: &mut Mesh, stats: &mut Stats) {
@@ -778,4 +803,35 @@ fn vertex_point(s: &StepFile, v: Vertex) -> DVec3 {
             .expect("Could not get VertexPoint")
             .vertex_geometry
             .cast())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_ref_direction_is_perpendicular_to_axis() {
+        for axis in [
+            DVec3::new(1.0, 0.0, 0.0), DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 0.0, 1.0),
+            DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 1.0, 1.0).normalize(),
+        ] {
+            let r = build_ref_direction(axis, None);
+            assert!((r.norm() - 1.0).abs() < 1e-9);
+            assert!(r.dot(&axis).abs() < 1e-9);
+            assert!(axis.cross(&r).norm() > 0.99);
+        }
+    }
+
+    #[test]
+    fn parallel_ref_direction_falls_back() {
+        let axis = DVec3::new(1.0, 0.0, 0.0);
+        let r = build_ref_direction(axis, Some(axis));
+        assert!(r.dot(&axis).abs() < 1e-9);
+    }
+
+    #[test]
+    fn valid_ref_direction_is_kept() {
+        let r = build_ref_direction(DVec3::new(0.0, 0.0, 1.0), Some(DVec3::new(0.0, 1.0, 0.0)));
+        assert!((r - DVec3::new(0.0, 1.0, 0.0)).norm() < 1e-9);
+    }
 }
