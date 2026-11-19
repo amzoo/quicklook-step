@@ -27,6 +27,13 @@ pub struct FFIMesh {
 /// Returns null on failure. Caller must free with `foxtrot_free_mesh`.
 #[no_mangle]
 pub extern "C" fn foxtrot_parse_step_file(path: *const c_char) -> *mut FFIMesh {
+    // The foxtrot parser/triangulator can panic on malformed or unsupported
+    // files. A panic escaping an `extern "C"` function aborts the host process
+    // (SIGABRT), so contain it and report failure as a null mesh instead.
+    std::panic::catch_unwind(|| parse_step_file_impl(path)).unwrap_or(ptr::null_mut())
+}
+
+fn parse_step_file_impl(path: *const c_char) -> *mut FFIMesh {
     if path.is_null() {
         return ptr::null_mut();
     }
