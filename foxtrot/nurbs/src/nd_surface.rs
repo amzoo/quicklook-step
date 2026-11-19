@@ -124,11 +124,15 @@ impl<const D: usize> NDBSplineSurface<D> {
     pub fn aspect_ratio(&self) -> f64 {
         let mut u_sum = 0.0;
         let mut v_sum = 0.0;
-        // Helper function to find 3-distance even if this is 4D
-        let distance = |a, b| {
-            let delta: TVec<f64, D> = a - b;
-            DVec3::new(delta[0], delta[1], delta[2]).norm()
+        // Helper function to find 3-distance even if this is 4D.  Rational
+        // (4D) control points are stored in homogeneous form (x*w, y*w, z*w, w),
+        // so they must be divided by their weight first; otherwise models
+        // that sit far from the origin get wildly wrong distances.
+        let to_3d = |a: TVec<f64, D>| {
+            let w = if D == 4 { a[3] } else { 1.0 };
+            DVec3::new(a[0] / w, a[1] / w, a[2] / w)
         };
+        let distance = |a: TVec<f64, D>, b: TVec<f64, D>| (to_3d(a) - to_3d(b)).norm();
         for i in 0..self.control_points.len() {
             for j in 0..self.control_points[i].len() {
                 if i > 0 {
@@ -145,5 +149,31 @@ impl<const D: usize> NDBSplineSurface<D> {
         let v_mean = v_sum / self.control_points[0].len() as f64;
 
         u_mean / v_mean
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra_glm::DVec4;
+
+    fn surface<const D: usize>(pts: Vec<Vec<TVec<f64, D>>>) -> NDBSplineSurface<D> {
+        let k = KnotVector::from_multiplicities(1, &[0.0, 1.0], &[2, 2]);
+        NDBSplineSurface::new(true, true, k.clone(), k, pts)
+    }
+
+    /// A unit square patch far from the origin, with rational weights != 1.
+    /// The aspect ratio must be 1 regardless of weights or offset, which
+    /// requires dividing homogeneous control points by their weight.
+    #[test]
+    fn aspect_ratio_ignores_weights_and_offset() {
+        let (ox, oy) = (5600.0, -4900.0);
+        let p = |x: f64, y: f64, w: f64| DVec4::new((ox + x) * w, (oy + y) * w, 0.0, w);
+        let weighted = surface::<4>(vec![
+            vec![p(0.0, 0.0, 1.0), p(1.0, 0.0, 0.5)],
+            vec![p(0.0, 1.0, 0.5), p(1.0, 1.0, 1.0)],
+        ]);
+        assert!((weighted.aspect_ratio() - 1.0).abs() < 1e-9,
+                "got {}", weighted.aspect_ratio());
     }
 }

@@ -6,6 +6,9 @@ use glm::{DVec2, DVec3, DVec4, DMat4};
 use nurbs::{AbstractSurface, NDBSplineSurface, SampledSurface};
 use crate::{Error, mesh::Vertex};
 
+/// Interior Steiner points per axis on B-spline / NURBS faces
+const NURBS_STEINER_GRID: usize = 16;
+
 // Represents a surface in 3D space, with a function to project a 3D point
 // on the surface down to a 2D space.
 #[derive(Debug, Clone)]
@@ -342,7 +345,18 @@ impl Surface {
         let num_pts = match self {
             Surface::Sphere { .. }   => 6,
             Surface::Torus { .. } => 32,
+            // Curved B-spline / NURBS patches need interior points too.  With
+            // only boundary points, a strongly curved patch (e.g. a quarter of
+            // a torus) is triangulated as a flat polygon across its hollow.
+            Surface::BSpline(_) | Surface::NURBS(_) => NURBS_STEINER_GRID,
             _ => 0,
+        };
+        // `lower_verts` stretches V by the control-net aspect ratio for
+        // B-spline surfaces, so undo that before evaluating the surface.
+        let aspect_ratio = match self {
+            Surface::NURBS(surf) => surf.surf.aspect_ratio(),
+            Surface::BSpline(surf) => surf.surf.aspect_ratio(),
+            _ => 1.0,
         };
 
         for x in 0..num_pts {
@@ -352,7 +366,7 @@ impl Surface {
                 let y_frac = (y as f64 + 1.0) / (num_pts as f64 + 1.0);
                 let v = y_frac * ymax + (1.0 - y_frac) * ymin;
 
-                let uv = DVec2::new(u, v);
+                let uv = DVec2::new(u, v / aspect_ratio);
                 if let Some(pos) = self.raise(uv) {
                     pts.push((u, v));
                     verts.push(Vertex {
