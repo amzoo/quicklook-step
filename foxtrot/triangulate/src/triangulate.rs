@@ -504,7 +504,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
     match &s[surf] {
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0))
+            Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0)
         },
         Entity::ToroidalSurface(c) => {
             let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position);
@@ -514,12 +514,12 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
             // We'll ignore axis and ref_direction in favor of building an
             // orthonormal basis later on
             let (location, axis, ref_direction) = axis2_placement_3d(s, p.position);
-            Ok(Surface::new_plane(axis, ref_direction, location))
+            Surface::new_plane(axis, ref_direction, location)
         },
         // We treat cones like planes, since that's a valid mapping into 2D
         Entity::ConicalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_cone(axis, ref_direction, location, c.semi_angle.0))
+            Surface::new_cone(axis, ref_direction, location, c.semi_angle.0)
         },
         Entity::SphericalSurface(c) => {
             // We'll ignore axis and ref_direction in favor of building an

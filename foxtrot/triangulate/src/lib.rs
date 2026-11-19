@@ -15,6 +15,9 @@ pub enum Error {
     #[error("Could not convert into a Curve")]
     UnknownCurveType,
 
+    #[error("Surface has a degenerate (non-invertible) coordinate frame")]
+    DegenerateSurface,
+
     #[error("Closed NURBS and b-spline surfaces are not implemented")]
     ClosedSurface,
 

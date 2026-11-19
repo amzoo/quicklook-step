@@ -55,15 +55,18 @@ impl Surface {
             location, radius,
         }
     }
-    pub fn new_cylinder(axis: DVec3, ref_direction: DVec3, location: DVec3, radius: f64) -> Self {
+    pub fn new_cylinder(axis: DVec3, ref_direction: DVec3, location: DVec3, radius: f64)
+        -> Result<Self, Error>
+    {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        Surface::Cylinder {
+        let mat_i = mat.try_inverse().ok_or(Error::DegenerateSurface)?;
+        Ok(Surface::Cylinder {
             mat,
-            mat_i: mat.try_inverse().expect("Could not invert"),
+            mat_i,
             axis, radius, location,
             z_min: 0.0,
             z_max: 0.0,
-        }
+        })
     }
 
     pub fn new_torus(location: DVec3, axis: DVec3,
@@ -77,22 +80,21 @@ impl Surface {
         }
     }
 
-    pub fn new_plane(axis: DVec3, ref_direction: DVec3, location: DVec3) -> Self {
-        Surface::Plane {
-            mat_i: Self::make_rigid_transform(axis, ref_direction, location)
-                .try_inverse()
-                .expect("Could not invert"),
-            normal: axis,
-        }
+    pub fn new_plane(axis: DVec3, ref_direction: DVec3, location: DVec3)
+        -> Result<Self, Error>
+    {
+        let mat_i = Self::make_rigid_transform(axis, ref_direction, location)
+            .try_inverse()
+            .ok_or(Error::DegenerateSurface)?;
+        Ok(Surface::Plane { mat_i, normal: axis })
     }
 
-    pub fn new_cone(axis: DVec3, ref_direction: DVec3, location: DVec3, angle: f64) -> Self {
+    pub fn new_cone(axis: DVec3, ref_direction: DVec3, location: DVec3, angle: f64)
+        -> Result<Self, Error>
+    {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
-        Surface::Cone {
-            mat,
-            mat_i: mat.try_inverse().expect("Could not invert"),
-            angle,
-        }
+        let mat_i = mat.try_inverse().ok_or(Error::DegenerateSurface)?;
+        Ok(Surface::Cone { mat, mat_i, angle })
     }
 
     pub fn make_affine_transform(z_world: DVec3, x_world: DVec3, y_world: DVec3, origin_world: DVec3) -> DMat4 {
@@ -411,5 +413,19 @@ impl Surface {
                 (mat * norm.to_homogeneous()).xyz()
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn degenerate_frames_return_error_instead_of_panicking() {
+        let zero = DVec3::new(0.0, 0.0, 0.0);
+        let x = DVec3::new(1.0, 0.0, 0.0);
+        assert_eq!(Surface::new_cylinder(zero, x, zero, 1.0).err(), Some(Error::DegenerateSurface));
+        assert_eq!(Surface::new_plane(zero, zero, zero).err(), Some(Error::DegenerateSurface));
+        assert_eq!(Surface::new_cone(zero, x, zero, 0.5).err(), Some(Error::DegenerateSurface));
     }
 }
