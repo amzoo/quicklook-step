@@ -7,7 +7,7 @@ use nurbs::{AbstractSurface, NDBSplineSurface, SampledSurface};
 use crate::{Error, mesh::Vertex};
 
 /// Interior Steiner points per axis on B-spline / NURBS faces
-const NURBS_STEINER_GRID: usize = 16;
+const NURBS_STEINER_GRID: usize = 32;
 
 // Represents a surface in 3D space, with a function to project a 3D point
 // on the surface down to a 2D space.
