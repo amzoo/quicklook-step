@@ -10,6 +10,8 @@
 			<array>
 				<string>com.quicklookstep.step</string>
 			</array>
+			<key>QLIsDataBasedPreview</key>
+			<true/>
 			<key>QLSupportsSearchableItems</key>
 			<false/>
 		</dict>
