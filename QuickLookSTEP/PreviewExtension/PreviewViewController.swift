@@ -14,6 +14,13 @@ class PreviewViewController: QLPreviewProvider, QLPreviewingController {
     func providePreview(for request: QLFilePreviewRequest) async throws -> QLPreviewReply {
         let scene = try STEPSceneBuilder.buildScene(fromPath: request.fileURL.path)
 
+        // Export geometry only. Apple's viewer supplies its own camera and
+        // lighting and frames the model to fit; our camera and light nodes
+        // would otherwise enlarge the scene bounds and shrink the model.
+        for node in scene.rootNode.childNodes where node.camera != nil || node.light != nil {
+            node.removeFromParentNode()
+        }
+
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory
         Self.removeStaleTempDirs(in: tmp, using: fm)
