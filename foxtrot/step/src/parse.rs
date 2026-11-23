@@ -118,6 +118,8 @@ impl<'a> Parse<'a> for Logical {
         alt((
             map(tag(".T."), |_| Logical(Some(true))),
             map(tag(".F."), |_| Logical(Some(false))),
+            // ISO 10303-21 writes an unknown LOGICAL as `.U.`
+            map(tag(".U."), |_| Logical(None)),
             map(tag(".UNKNOWN."), |_| Logical(None)),
         ))(s)
     }

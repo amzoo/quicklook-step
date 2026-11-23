@@ -1,4 +1,5 @@
 use std::f64::{EPSILON, consts::PI};
+use std::ops::Range;
 
 use nalgebra_glm as glm;
 use glm::{DVec2, DVec3, DVec4, DMat4};
@@ -8,6 +9,10 @@ use crate::{Error, mesh::Vertex};
 
 /// Interior Steiner points per axis on B-spline / NURBS faces
 const NURBS_STEINER_GRID: usize = 32;
+
+/// Interior rows along the straight direction of a patch that is curved only
+/// one way
+const STRAIGHT_STEINER_ROWS: usize = 4;
 
 // Represents a surface in 3D space, with a function to project a 3D point
 // on the surface down to a 2D space.
@@ -31,8 +36,8 @@ pub enum Surface {
         mat_i: DMat4,
         angle: f64,
     },
-    BSpline(SampledSurface<3>),
-    NURBS(SampledSurface<4>),
+    BSpline(SampledSurface<3>, Option<Annulus>),
+    NURBS(SampledSurface<4>, Option<Annulus>),
     Sphere {
         location: DVec3,
         mat: DMat4,     // uv to world
@@ -47,6 +52,52 @@ pub enum Surface {
         major_radius: f64,
         minor_radius: f64,
     },
+}
+
+/// Maps a face that wraps all the way around a closed spline surface (e.g. a
+/// fillet band on a torus, bounded by two full circles and no seam edge)
+/// onto a flat ring: the wrapping parameter becomes the angle and the other
+/// parameter the radius.  A plain (u, v) rectangle can't hold such a face,
+/// because each boundary circle would become an open line.
+#[derive(Debug, Clone, Copy)]
+pub struct Annulus {
+    /// True if the face wraps around in U (else in V)
+    around_u: bool,
+    start: f64,
+    period: f64,
+    /// Range of the other parameter, mapped onto radius 1..2
+    r0: f64,
+    r1: f64,
+}
+
+impl Annulus {
+    fn radial_span(&self) -> f64 {
+        if self.r1 - self.r0 > 1e-12 { self.r1 - self.r0 } else { 1.0 }
+    }
+
+    /// Surface parameters to a point on the ring
+    fn to_plane(&self, uv: DVec2) -> (f64, f64) {
+        let (a, r) = if self.around_u { (uv.x, uv.y) } else { (uv.y, uv.x) };
+        let theta = 2.0 * PI * (a - self.start) / self.period;
+        let t = (r - self.r0) / self.radial_span();
+        // The radius runs against V when wrapping in U (and with U when
+        // wrapping in V) so triangles keep the surface's orientation.
+        let rho = if self.around_u { 2.0 - t } else { 1.0 + t };
+        (rho * theta.cos(), rho * theta.sin())
+    }
+
+    /// Grid of surface parameters covering the ring
+    fn grid(&self, num_a: usize, num_r: usize) -> Vec<DVec2> {
+        let mut out = Vec::new();
+        for i in 0..num_a {
+            let a = self.start + self.period * (i as f64) / (num_a as f64);
+            for j in 0..num_r {
+                let r = self.r0 + self.radial_span() * (j as f64 + 1.0) / (num_r as f64 + 1.0);
+                out.push(if self.around_u { DVec2::new(a, r) } else { DVec2::new(r, a) });
+            }
+        }
+        out
+    }
 }
 
 impl Surface {
@@ -192,8 +243,8 @@ impl Surface {
                 };
                 Ok(scale * DVec2::new(x, minor_angle.sin()))
             },
-            Surface::BSpline(surf) => Self::surf_lower(p, surf),
-            Surface::NURBS(surf) => Self::surf_lower(p, surf),
+            Surface::BSpline(surf, _) => Self::surf_lower(p, surf),
+            Surface::NURBS(surf, _) => Self::surf_lower(p, surf),
             Surface::Sphere { mat_i, radius, .. } => {
                 // mat_i is constructed in prepare to be a reasonable basis
                 let p = (mat_i * p_).xyz() / *radius;
@@ -253,7 +304,9 @@ impl Surface {
         }
     }
 
-    pub fn lower_verts(&mut self, verts: &mut [Vertex])
+    /// Lowers boundary vertices to 2D.  `loops` gives the index range of
+    /// each closed boundary loop within `verts`.
+    pub fn lower_verts(&mut self, verts: &mut [Vertex], loops: &[Range<usize>])
         -> Result<Vec<(f64, f64)>, Error>
     {
         self.prepare(verts);
@@ -265,21 +318,126 @@ impl Surface {
             v.norm = self.normal(v.pos, proj);
             pts.push((proj.x, proj.y));
         }
-        // If this is a BSpline surface, calculate an aspect ratio based on the
-        // control points net, then use it to transform projected points.  This
-        // means that positions in 2D (UV) space are closer to positions in 3D
-        // space, so the triangulation is better.
-        let aspect_ratio = match self {
-            Surface::NURBS(surf) => Some(surf.surf.aspect_ratio()),
-            Surface::BSpline(surf) => Some(surf.surf.aspect_ratio()),
-            _ => None,
-        };
-        if let Some(aspect_ratio) = aspect_ratio {
+        if !matches!(self, Surface::BSpline(..) | Surface::NURBS(..)) {
+            return Ok(pts);
+        }
+
+        self.unwrap_seams(&mut pts, loops);
+        if let Some(annulus) = self.find_annulus(&pts, loops) {
             for p in pts.iter_mut() {
-                p.1 *= aspect_ratio;
+                *p = annulus.to_plane(DVec2::new(p.0, p.1));
             }
+            match self {
+                Surface::BSpline(_, a) | Surface::NURBS(_, a) => *a = Some(annulus),
+                _ => unreachable!(),
+            }
+            return Ok(pts);
+        }
+
+        // Calculate an aspect ratio based on the control points net, then use
+        // it to transform projected points.  This means that positions in 2D
+        // (UV) space are closer to positions in 3D space, so the
+        // triangulation is better.
+        let aspect_ratio = match self {
+            Surface::NURBS(surf, _) => surf.surf.aspect_ratio(),
+            Surface::BSpline(surf, _) => surf.surf.aspect_ratio(),
+            _ => unreachable!(),
+        };
+        for p in pts.iter_mut() {
+            p.1 *= aspect_ratio;
         }
         Ok(pts)
+    }
+
+    /// If a boundary loop winds all the way around a closed direction, the
+    /// face needs the ring mapping instead of a (u, v) rectangle.
+    fn find_annulus(&self, pts: &[(f64, f64)], loops: &[Range<usize>]) -> Option<Annulus> {
+        let (pu, pv) = self.seam_periods();
+        let turns = |period: f64, coord: fn(&(f64, f64)) -> f64| loops.iter().any(|l| {
+            if l.len() < 2 { return false; }
+            let (first, last) = (coord(&pts[l.start]), coord(&pts[l.end - 1]));
+            let close = (first - last + period / 2.0).rem_euclid(period) - period / 2.0;
+            ((last - first + close) / period).round() != 0.0
+        });
+        let (around_u, (start, period)) = if let Some(p) = pu.filter(|p| turns(p.1, |q| q.0)) {
+            (true, p)
+        } else if let Some(p) = pv.filter(|p| turns(p.1, |q| q.1)) {
+            (false, p)
+        } else {
+            return None;
+        };
+        let radial = |q: &(f64, f64)| if around_u { q.1 } else { q.0 };
+        let (mut r0, mut r1) = (f64::INFINITY, f64::NEG_INFINITY);
+        for q in pts {
+            r0 = r0.min(radial(q));
+            r1 = r1.max(radial(q));
+        }
+        Some(Annulus { around_u, start, period, r0, r1 })
+    }
+
+    /// For a B-spline / NURBS surface that closes on itself (e.g. a full
+    /// tube), the (start, period) of each closed parameter direction.
+    fn seam_periods(&self) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+        fn periods<const N: usize>(s: &SampledSurface<N>)
+            -> (Option<(f64, f64)>, Option<(f64, f64)>)
+            where NDBSplineSurface<N>: AbstractSurface
+        {
+            let f = &s.surf;
+            (f.closed_in_u().then(|| (f.min_u(), f.max_u() - f.min_u())),
+             f.closed_in_v().then(|| (f.min_v(), f.max_v() - f.min_v())))
+        }
+        match self {
+            Surface::BSpline(s, _) => periods(s),
+            Surface::NURBS(s, _) => periods(s),
+            _ => (None, None),
+        }
+    }
+
+    /// Points on the seam of a closed surface can lower to either end of the
+    /// parameter range, which tears the boundary loop apart in 2D.  Walk each
+    /// loop and shift every point by whole periods so it stays next to the
+    /// previous one, then shift whole loops so holes sit inside their face.
+    fn unwrap_seams(&self, pts: &mut [(f64, f64)], loops: &[Range<usize>]) {
+        let (pu, pv) = self.seam_periods();
+        // Value of `x` shifted by whole periods to lie closest to `target`
+        let near = |target: f64, x: f64, period: f64| {
+            x - ((x - target) / period).round() * period
+        };
+        let get = |q: &(f64, f64), axis: usize| if axis == 0 { q.0 } else { q.1 };
+        let set = |q: &mut (f64, f64), axis: usize, x: f64| {
+            if axis == 0 { q.0 = x } else { q.1 = x }
+        };
+        let mean = |pts: &[(f64, f64)], axis: usize|
+            pts.iter().map(|q| get(q, axis)).sum::<f64>() / pts.len() as f64;
+
+        for (axis, period) in [(0, pu), (1, pv)] {
+            let Some((_, period)) = period else { continue };
+            for (i, l) in loops.iter().enumerate() {
+                for j in (l.start + 1)..l.end {
+                    let x = near(get(&pts[j - 1], axis), get(&pts[j], axis), period);
+                    set(&mut pts[j], axis, x);
+                }
+                // Move inner loops by whole periods to sit by the first loop
+                if i > 0 && !l.is_empty() && !loops[0].is_empty() {
+                    let m = mean(&pts[l.clone()], axis);
+                    let shift = near(mean(&pts[loops[0].clone()], axis), m, period) - m;
+                    for q in &mut pts[l.clone()] {
+                        set(q, axis, get(q, axis) + shift);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bring an unwrapped (u, v) back into the surface's parameter domain
+    fn wrap_uv(&self, uv: DVec2) -> DVec2 {
+        let (pu, pv) = self.seam_periods();
+        let wrap = |x: f64, p: Option<(f64, f64)>| match p {
+            Some((start, period)) if period > 0.0 =>
+                start + (x - start).rem_euclid(period),
+            _ => x,
+        };
+        DVec2::new(wrap(uv.x, pu), wrap(uv.y, pv))
     }
 
     pub fn raise(&self, uv: DVec2) -> Option<DVec3> {
@@ -303,8 +461,8 @@ impl Surface {
                     .xyz();
                 Some(pos)
             },
-            Surface::BSpline(s) => Some(s.surf.point(uv)),
-            Surface::NURBS(s) => Some(s.surf.point(uv)),
+            Surface::BSpline(s, _) => Some(s.surf.point(self.wrap_uv(uv))),
+            Surface::NURBS(s, _) => Some(s.surf.point(self.wrap_uv(uv))),
             Surface::Torus { mat, minor_radius, major_radius, .. } => {
                 let mut uv = uv;
                 if *major_radius > 0.0 {
@@ -338,32 +496,69 @@ impl Surface {
         (xmin, xmax, ymin, ymax)
     }
 
+    /// Interior grid lines needed along one parameter direction of a spline
+    /// surface: none if that direction is a single straight (degree 1) span.
+    fn steiner_count(knots: &nurbs::KnotVector) -> usize {
+        let spans = (1..knots.len()).filter(|&i| knots[i] > knots[i - 1]).count();
+        if knots.degree() == 1 && spans <= 1 { 0 } else { NURBS_STEINER_GRID }
+    }
+
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
-        let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
-        let num_pts = match self {
-            Surface::Sphere { .. }   => 6,
-            Surface::Torus { .. } => 32,
+        let (num_u, num_v) = match self {
+            Surface::Sphere { .. }   => (6, 6),
+            Surface::Torus { .. } => (32, 32),
             // Curved B-spline / NURBS patches need interior points too.  With
             // only boundary points, a strongly curved patch (e.g. a quarter of
             // a torus) is triangulated as a flat polygon across its hollow.
-            Surface::BSpline(_) | Surface::NURBS(_) => NURBS_STEINER_GRID,
-            _ => 0,
+            // A direction that is one straight span needs none, which keeps
+            // flat patches (Rhino writes planes as bilinear B-splines) cheap.
+            Surface::BSpline(s, _) => (Self::steiner_count(&s.surf.u_knots),
+                                    Self::steiner_count(&s.surf.v_knots)),
+            Surface::NURBS(s, _) => (Self::steiner_count(&s.surf.u_knots),
+                                  Self::steiner_count(&s.surf.v_knots)),
+            _ => (0, 0),
         };
+        // A patch straight in one direction but curved in the other (a hole
+        // wall, a rolled edge) still needs a few rows along the straight
+        // direction, so the triangles follow the curve instead of cutting it.
+        let (num_u, num_v) = match (num_u, num_v) {
+            (0, n) if n > 0 => (STRAIGHT_STEINER_ROWS, n),
+            (n, 0) if n > 0 => (n, STRAIGHT_STEINER_ROWS),
+            other => other,
+        };
+        // A face wrapped around a closed surface was mapped onto a ring, so
+        // its interior points come from a parameter grid mapped the same way.
+        if let Surface::BSpline(_, Some(a)) | Surface::NURBS(_, Some(a)) = self {
+            let (num_a, num_r) = if a.around_u { (num_u, num_v) } else { (num_v, num_u) };
+            for uv in a.grid(num_a.max(STRAIGHT_STEINER_ROWS * 4), num_r) {
+                if let Some(pos) = self.raise(uv) {
+                    pts.push(a.to_plane(uv));
+                    verts.push(Vertex {
+                        pos,
+                        norm: self.normal(pos, uv),
+                        color: DVec3::new(0.0, 0.0, 0.0),
+                    });
+                }
+            }
+            return;
+        }
+
+        let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
         // `lower_verts` stretches V by the control-net aspect ratio for
         // B-spline surfaces, so undo that before evaluating the surface.
         let aspect_ratio = match self {
-            Surface::NURBS(surf) => surf.surf.aspect_ratio(),
-            Surface::BSpline(surf) => surf.surf.aspect_ratio(),
+            Surface::NURBS(surf, _) => surf.surf.aspect_ratio(),
+            Surface::BSpline(surf, _) => surf.surf.aspect_ratio(),
             _ => 1.0,
         };
 
-        for x in 0..num_pts {
-            let x_frac = (x as f64 + 1.0) / (num_pts as f64 + 1.0);
+        for x in 0..num_u {
+            let x_frac = (x as f64 + 1.0) / (num_u as f64 + 1.0);
             let u = x_frac * xmax + (1.0 - x_frac) * xmin;
-            for y in 0..num_pts {
-                let y_frac = (y as f64 + 1.0) / (num_pts as f64 + 1.0);
+            for y in 0..num_v {
+                let y_frac = (y as f64 + 1.0) / (num_v as f64 + 1.0);
                 let v = y_frac * ymax + (1.0 - y_frac) * ymin;
 
                 let uv = DVec2::new(u, v / aspect_ratio);
@@ -415,8 +610,8 @@ impl Surface {
                 let norm = DVec3::new(proj.x, proj.y, 0.0).normalize();
                 (mat * norm.to_homogeneous()).xyz()
             },
-            Surface::BSpline(surf) => Self::surf_normal(uv, surf),
-            Surface::NURBS(surf) => Self::surf_normal(uv, surf),
+            Surface::BSpline(surf, _) => Self::surf_normal(self.wrap_uv(uv), surf),
+            Surface::NURBS(surf, _) => Self::surf_normal(self.wrap_uv(uv), surf),
             Surface::Torus { mat, mat_i, major_radius, .. } => {
                 let p = (*mat_i * DVec4::new(p.x, p.y, p.z, 1.0)).xyz();
                 let major_angle = p.y.atan2(p.z);

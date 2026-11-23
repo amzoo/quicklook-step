@@ -13,7 +13,7 @@ use step::{
 };
 use crate::{
     Error,
-    curve::Curve,
+    curve::{Curve, Sense},
     mesh, mesh::{Mesh, Triangle},
     stats::Stats,
     surface::Surface
@@ -79,6 +79,18 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
             })
         .collect();
 
+    // Construction / reference geometry (CATIA's "supplemental geometry",
+    // datum planes, ...) is stored in a CONSTRUCTIVE_GEOMETRY_REPRESENTATION.
+    // CAD viewers hide it, so we do too.
+    let constructive: HashSet<usize> = s.0.iter()
+        .filter_map(|e| match e {
+            Entity::ConstructiveGeometryRepresentation(c) => Some(c.items.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|i| i.0)
+        .collect();
+
     // Store a map of parent -> (child, transform)
     let mut transform_stack = build_transform_stack(s, false);
     let mut roots = transform_stack_roots(&transform_stack);
@@ -127,7 +139,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
                 e => panic!("Could not get shape from {:?}", e),
             };
 
-            for m in items.iter() {
+            for m in items.iter().filter(|m| !constructive.contains(&m.0)) {
                 match &s[*m] {
                     Entity::ManifoldSolidBrep(_)
                     | Entity::BrepWithVoids(_)
@@ -144,7 +156,7 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     if to_mesh.is_empty() {
         s.0.iter()
             .enumerate()
-            .filter(|(_i, e)|
+            .filter(|(i, e)| !constructive.contains(i) &&
                 match e {
                     Entity::ManifoldSolidBrep(_)
                     | Entity::BrepWithVoids(_)
@@ -245,6 +257,10 @@ pub fn triangulate(s: &StepFile) -> (Mesh, Stats) {
     info!("num_faces: {}", stats.num_faces);
     info!("num_errors: {}", stats.num_errors);
     info!("num_panics: {}", stats.num_panics);
+    if stats.num_errors + stats.num_panics > 0 {
+        warn!("{} of {} faces failed to triangulate",
+              stats.num_errors + stats.num_panics, stats.num_faces);
+    }
     (mesh, stats)
 }
 
@@ -305,19 +321,19 @@ fn presentation_style_color(s: &StepFile, p: PresentationStyleAssignment)
         .map(|c| DVec3::new(c.red, c.green, c.blue))
 }
 
-fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> DVec3 {
+pub(crate) fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> DVec3 {
     let p = s.entity(a).expect("Could not get cartesian point");
     DVec3::new(p.coordinates[0].0, p.coordinates[1].0, p.coordinates[2].0)
 }
 
-fn direction(s: &StepFile, a: Direction) -> DVec3 {
+pub(crate) fn direction(s: &StepFile, a: Direction) -> DVec3 {
     let p = s.entity(a).expect("Could not get cartesian point");
     DVec3::new(p.direction_ratios[0],
                p.direction_ratios[1],
                p.direction_ratios[2])
 }
 
-fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, DVec3) {
+pub(crate) fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, DVec3) {
     let a = s.entity(t).expect("Could not get Axis2Placement3d");
     let location = cartesian_point(s, a.location);
     // TODO: this doesn't necessarily match the behavior of `build_axes`
@@ -366,7 +382,8 @@ fn open_shell(s: &StepFile, c: OpenShell, mesh: &mut Mesh, stats: &mut Stats) {
     let cs = s.entity(c).expect("Could not get OpenShell");
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
+            error!("Failed to triangulate face #{}: {}", face.0, err);
+            stats.num_errors += 1;
         }
     }
     stats.num_shells += 1;
@@ -376,7 +393,8 @@ fn closed_shell(s: &StepFile, c: ClosedShell, mesh: &mut Mesh, stats: &mut Stats
     let cs = s.entity(c).expect("Could not get ClosedShell");
     for face in &cs.cfs_faces {
         if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
-            error!("Failed to triangulate {:?}: {}", s[*face], err);
+            error!("Failed to triangulate face #{}: {}", face.0, err);
+            stats.num_errors += 1;
         }
     }
     stats.num_shells += 1;
@@ -388,8 +406,15 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     let face = s.entity(f).expect("Could not get AdvancedFace");
     stats.num_faces += 1;
 
+    // Walk the face's boundary loops first: swept surfaces are infinite in
+    // STEP, so they need the boundary to know how far to extend.
+    let bounds = face.bounds.iter()
+        .map(|b| face_bound(s, *b))
+        .collect::<Result<Vec<_>, _>>()?;
+    let hint: Vec<DVec3> = bounds.iter().flatten().cloned().collect();
+
     // Grab the surface, returning early if it's unimplemented
-    let mut surf = get_surface(s, face.face_geometry)?;
+    let mut surf = get_surface(s, face.face_geometry, &hint)?;
 
     // This is the starting point at which we insert new vertices
     let offset = mesh.verts.len();
@@ -399,8 +424,9 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     let mut edges = Vec::new();
     let v_start = mesh.verts.len();
     let mut num_pts = 0;
-    for b in &face.bounds {
-        let bound_contours = face_bound(s, *b)?;
+    // Index range (relative to v_start) of each closed boundary loop
+    let mut loops = Vec::new();
+    for bound_contours in bounds {
 
         match bound_contours.len() {
             // We should always have non-zero items in the contour
@@ -443,6 +469,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
                 // Close the loop by returning to the starting point
                 edges.pop();
                 edges.last_mut().unwrap().1 = start;
+                loops.push(start..num_pts);
             }
         }
     }
@@ -452,7 +479,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     // _fail_ due to these points, so if that happens, we nuke the point (by
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
-    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..])?;
+    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..], &loops)?;
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let result = std::panic::catch_unwind(|| {
@@ -525,15 +552,20 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     Ok(())
 }
 
-fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
+fn get_surface(s: &StepFile, surf: ap214::Surface, hint: &[DVec3])
+    -> Result<Surface, Error>
+{
     match &s[surf] {
+        Entity::SurfaceOfLinearExtrusion(e) => crate::swept::extrusion(s, e, hint),
+        Entity::SurfaceOfRevolution(r) => crate::swept::revolution(s, r, hint),
         Entity::CylindricalSurface(c) => {
             let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
             Surface::new_cylinder(axis, ref_direction, location, c.radius.0.0.0)
         },
         Entity::ToroidalSurface(c) => {
-            let (location, axis, _ref_direction) = axis2_placement_3d(s, c.position);
-            Ok(Surface::new_torus(location, axis, c.major_radius.0.0.0, c.minor_radius.0.0.0))
+            let (location, axis, ref_direction) = axis2_placement_3d(s, c.position);
+            crate::swept::torus(location, axis, ref_direction,
+                                c.major_radius.0.0.0, c.minor_radius.0.0.0)
         },
         Entity::Plane(p) => {
             // We'll ignore axis and ref_direction in favor of building an
@@ -580,7 +612,7 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::BSpline(SampledSurface::new(surf)))
+            Ok(Surface::BSpline(SampledSurface::new(surf), None))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineSurfaceWithKnots(b) = &v[0] {
@@ -631,17 +663,17 @@ fn get_surface(s: &StepFile, surf: ap214::Surface) -> Result<Surface, Error> {
                 v_knot_vec,
                 control_points_list,
             );
-            Ok(Surface::NURBS(SampledSurface::new(surf)))
+            Ok(Surface::NURBS(SampledSurface::new(surf), None))
 
         },
         e => {
-            warn!("Could not get surface from {:?}", e);
+            warn!("Unsupported surface type {}", entity_name(e));
             Err(Error::UnknownSurfaceType)
         },
     }
 }
 
-fn control_points_1d(s: &StepFile, row: &Vec<CartesianPoint>) -> Vec<DVec3> {
+pub(crate) fn control_points_1d(s: &StepFile, row: &Vec<CartesianPoint>) -> Vec<DVec3> {
     row.iter().map(|p| cartesian_point(s, *p)).collect()
 }
 
@@ -693,7 +725,12 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
 
 fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3>, Error> {
     let edge_curve = s.entity(e).expect("Could not get EdgeCurve");
-    let curve = curve(s, edge_curve, edge_curve.edge_geometry, orientation)?;
+    // An edge we can't model exactly is drawn straight between its vertices,
+    // so the face still renders (approximately) instead of vanishing.
+    let curve = match curve(s, edge_curve, edge_curve.edge_geometry, orientation) {
+        Err(Error::UnknownCurveType) => Curve::new_line(),
+        r => r?,
+    };
 
     let (start, end) = if orientation {
         (edge_curve.edge_start, edge_curve.edge_end)
@@ -723,9 +760,9 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                                edge_curve.same_sense ^ !orientation)
         },
         Entity::BSplineCurveWithKnots(c) => {
-            if c.closed_curve.0 != Some(false) {
-                return Err(Error::ClosedCurve);
-            } else if c.self_intersect.0 != Some(false) {
+            // Closed curves (e.g. Rhino's hole circles) are fine; only reject
+            // curves that are known to cross themselves.
+            if c.self_intersect.0 == Some(true) {
                 return Err(Error::SelfIntersectingCurve);
             }
 
@@ -740,12 +777,14 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 c.degree.try_into().expect("Got negative degree"),
                 &knots, &multiplicities);
 
+            let periodic = c.closed_curve.0 == Some(true);
             let curve = nurbs::BSplineCurve::new(
-                c.closed_curve.0.unwrap() == false,
+                !periodic,
                 knot_vec,
                 control_points_list,
             );
-            Curve::BSplineCurveWithKnots(SampledCurve::new(curve))
+            Curve::BSplineCurveWithKnots(SampledCurve::new(curve),
+                                         spline_sense(edge_curve, periodic, orientation))
         },
         Entity::ComplexEntity(v) if v.len() == 2 => {
             let bspline = if let Entity::BSplineCurveWithKnots(b) = &v[0] {
@@ -775,12 +814,14 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
                 .map(|(p, w)| DVec4::new(p.x * w, p.y * w, p.z * w, *w))
                 .collect();
 
+            let periodic = bspline.closed_curve.0 == Some(true);
             let curve = nurbs::NURBSCurve::new(
-                bspline.closed_curve.0.unwrap() == false,
+                !periodic,
                 knot_vec,
                 control_points_list,
             );
-            Curve::NURBSCurve(SampledCurve::new(curve))
+            Curve::NURBSCurve(SampledCurve::new(curve),
+                              spline_sense(edge_curve, periodic, orientation))
         },
         Entity::SurfaceCurve(v) => {
             curve(s, edge_curve, v.curve_3d, orientation)?
@@ -788,13 +829,37 @@ fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
         Entity::SeamCurve(v) => {
             curve(s, edge_curve, v.curve_3d, orientation)?
         },
+        // Rhino 8 writes arcs as a TRIMMED_CURVE around a CIRCLE.  The edge's
+        // own vertices already mark the ends, so only the basis curve and its
+        // direction matter here.
+        Entity::TrimmedCurve(t) => {
+            curve(s, edge_curve, t.basis_curve, orientation ^ !t.sense_agreement)?
+        },
+        Entity::Polyline(p) => Curve::Polyline(
+            p.points.iter().map(|pt| cartesian_point(s, *pt)).collect()),
         // The Line type ignores pnt / dir and just uses u and v
         Entity::Line(_) => Curve::new_line(),
         e => {
-            warn!("Could not get edge from {:?}", e);
+            warn!("Unsupported edge curve {}, drawing it straight", entity_name(e));
             return Err(Error::UnknownCurveType);
         },
     })
+}
+
+/// Direction and closure of an edge along a spline curve, mirroring how the
+/// CIRCLE / ELLIPSE arms work out direction.
+fn spline_sense(edge_curve: &ap214::EdgeCurve_, periodic: bool, orientation: bool) -> Sense {
+    Sense {
+        closed: edge_curve.edge_start == edge_curve.edge_end,
+        periodic,
+        dir: edge_curve.same_sense ^ !orientation,
+    }
+}
+
+/// Short entity name for log messages (e.g. "OffsetSurface")
+fn entity_name(e: &Entity) -> String {
+    let dbg = format!("{:?}", e);
+    dbg.split(|c: char| c == '(' || c == ' ').next().unwrap_or("?").to_owned()
 }
 
 fn vertex_point(s: &StepFile, v: Vertex) -> DVec3 {

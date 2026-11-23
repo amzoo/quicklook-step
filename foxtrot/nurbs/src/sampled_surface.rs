@@ -11,7 +11,12 @@ pub struct SampledSurface<const N: usize> {
 impl<const N: usize> SampledSurface<N>
     where NDBSplineSurface<N>: AbstractSurface
 {
-    pub fn new(surf: NDBSplineSurface<N>) -> Self {
+    pub fn new(mut surf: NDBSplineSurface<N>) -> Self {
+        // Exporters don't always flag closed surfaces (Rhino writes `.F.` on
+        // full tubes), so trust the geometry: a direction whose two edges
+        // meet must wrap around in Newton's method instead of clamping.
+        surf.u_open = surf.u_open && !surf.closed_in_u();
+        surf.v_open = surf.v_open && !surf.closed_in_v();
         const N: usize = 8;
         let mut samples = Vec::new();
         for i in 0..surf.u_knots.len() - 1 {
@@ -53,6 +58,12 @@ impl<const N: usize> SampledSurface<N>
         let eps1 = 0.01; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
 
+        // Distance at which the point is simply on the surface.  The cosine
+        // test below divides by |S - P|, so it can't be used when that is ~0
+        // (e.g. a vertex sitting exactly on the seams of a closed torus).
+        let on_point = 1e-9 * (1.0 + P.abs().max());
+        let mut best = (f64::INFINITY, uv_0);
+
         let mut uv_i = uv_0;
         for _ in 0..256 {
             // The surface and its derivatives at uv_i
@@ -64,6 +75,12 @@ impl<const N: usize> SampledSurface<N>
             let S_uv = derivs[1][1]; // S_vu is the same
             let S_vv = derivs[0][2];
             let r = S - P;
+            if length(&r) < on_point {
+                return Some(uv_i);
+            }
+            if length(&r) < best.0 {
+                best = (length(&r), uv_i);
+            }
 
             // If |S(uv_i) - P| < \epsilon_1  and
             //    |S_u(uv_i) dot (S(uv_i) - P)| / |S_u(uv_i)| / |S(uv_i) - P| < \epsilon_2  and
@@ -146,6 +163,11 @@ impl<const N: usize> SampledSurface<N>
 
             // otherwise, iterate again
             uv_i = uv_ip1;
+        }
+        // Newton can bounce around a seam without meeting the cosine test;
+        // the closest point it visited is still good enough if it is close.
+        if best.0 < eps1 {
+            return Some(best.1);
         }
         error!("Could not find UV coordinates");
         None

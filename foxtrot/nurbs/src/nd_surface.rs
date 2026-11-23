@@ -150,6 +150,41 @@ impl<const D: usize> NDBSplineSurface<D> {
 
         u_mean / v_mean
     }
+
+    /// Control point in 3D, dividing out the weight for rational surfaces
+    fn point_3d(&self, i: usize, j: usize) -> DVec3 {
+        let a = self.control_points[i][j];
+        let w = if D == 4 { a[3] } else { 1.0 };
+        DVec3::new(a[0] / w, a[1] / w, a[2] / w)
+    }
+
+    /// Distance below which two control points count as the same point,
+    /// scaled to the model so it works far from the origin.
+    fn closure_tolerance(&self) -> f64 {
+        let mut scale: f64 = 1.0;
+        for i in 0..self.control_points.len() {
+            for j in 0..self.control_points[i].len() {
+                scale = scale.max(self.point_3d(i, j).abs().max());
+            }
+        }
+        scale * 1e-7
+    }
+
+    /// True when the surface meets itself along its u = min and u = max
+    /// edges (e.g. a full tube), so U wraps around.
+    pub fn closed_in_u(&self) -> bool {
+        let n = self.control_points.len();
+        let tol = self.closure_tolerance();
+        n > 1 && (0..self.control_points[0].len()).all(|j|
+            (self.point_3d(0, j) - self.point_3d(n - 1, j)).norm() < tol)
+    }
+
+    /// True when the surface meets itself along its v = min and v = max edges
+    pub fn closed_in_v(&self) -> bool {
+        let tol = self.closure_tolerance();
+        self.control_points.iter().enumerate().all(|(i, row)| row.len() > 1 &&
+            (self.point_3d(i, 0) - self.point_3d(i, row.len() - 1)).norm() < tol)
+    }
 }
 
 #[cfg(test)]

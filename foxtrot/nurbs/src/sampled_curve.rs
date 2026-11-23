@@ -37,7 +37,8 @@ impl<const N: usize> SampledCurve<N>
         let eps2 = 0.01; // a cosine error bound
 
         let mut u_i = u_0;
-        loop {
+        // Bounded so a point that never converges can't hang the caller
+        for _ in 0..256 {
             let derivs = self.curve.derivs::<2>(u_i);
             let C = derivs[0];
             let C_p = derivs[1];
@@ -78,6 +79,17 @@ impl<const N: usize> SampledCurve<N>
 
             u_i = u_ip1;
         }
+        u_i
+    }
+
+    /// Start of the curve's parameter domain
+    pub fn min_u(&self) -> f64 {
+        self.curve.min_u()
+    }
+
+    /// End of the curve's parameter domain
+    pub fn max_u(&self) -> f64 {
+        self.curve.max_u()
     }
 
     pub fn u_from_point(&self, p: DVec3) -> f64 {
