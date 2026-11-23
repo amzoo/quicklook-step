@@ -287,7 +287,7 @@
 				CODE_SIGN_ENTITLEMENTS = QuickLookSTEP/QuickLookSTEP.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = QuickLookSTEP/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -297,7 +297,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.3;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.quicklookstep.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -312,7 +312,7 @@
 				CODE_SIGN_ENTITLEMENTS = QuickLookSTEP/QuickLookSTEP.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = QuickLookSTEP/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -322,7 +322,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.3;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.quicklookstep.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -335,7 +335,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = PreviewExtension/PreviewExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PreviewExtension/Info.plist;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../include";
@@ -345,7 +345,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../foxtrot-ffi/target/universal";
-				MARKETING_VERSION = 1.1.3;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.quicklookstep.app.PreviewExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -360,7 +360,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = PreviewExtension/PreviewExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PreviewExtension/Info.plist;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../include";
@@ -370,7 +370,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../foxtrot-ffi/target/universal";
-				MARKETING_VERSION = 1.1.3;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.quicklookstep.app.PreviewExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
