@@ -2,10 +2,30 @@ use nalgebra_glm::{dot, length, length2, DMat2x2, DVec2, DVec3};
 use crate::{abstract_surface::AbstractSurface, nd_surface::NDBSplineSurface};
 use log::error;
 
+/// Diagonal of the bounding box of sampled points: the length scale that
+/// Newton's tolerances are measured against, so they work in any unit and
+/// for features of any size.
+pub(crate) fn sample_scale<'a, T: 'a>(pts: impl Iterator<Item = &'a (T, DVec3)>) -> f64 {
+    let mut lo = DVec3::repeat(f64::INFINITY);
+    let mut hi = DVec3::repeat(f64::NEG_INFINITY);
+    for (_, p) in pts {
+        lo = lo.inf(p);
+        hi = hi.sup(p);
+    }
+    let d = (hi - lo).norm();
+    if d.is_finite() && d > 0.0 { d } else { 1.0 }
+}
+
 #[derive(Debug, Clone)]
 pub struct SampledSurface<const N: usize> {
     pub surf: NDBSplineSurface<N>,
     samples: Vec<(DVec2, DVec3)>,
+    /// Size of the surface, for scale-independent tolerances
+    scale: f64,
+    /// The surface meets itself along u = min / u = max (e.g. a full tube)
+    pub closed_u: bool,
+    /// The surface meets itself along v = min / v = max
+    pub closed_v: bool,
 }
 
 impl<const N: usize> SampledSurface<N>
@@ -15,8 +35,11 @@ impl<const N: usize> SampledSurface<N>
         // Exporters don't always flag closed surfaces (Rhino writes `.F.` on
         // full tubes), so trust the geometry: a direction whose two edges
         // meet must wrap around in Newton's method instead of clamping.
-        surf.u_open = surf.u_open && !surf.closed_in_u();
-        surf.v_open = surf.v_open && !surf.closed_in_v();
+        // Evaluating the surface (rather than comparing control points) also
+        // catches periodic, unclamped splines whose end control points differ.
+        let (closed_u, closed_v) = Self::closure(&surf);
+        surf.u_open = surf.u_open && !closed_u;
+        surf.v_open = surf.v_open && !closed_v;
         const N: usize = 8;
         let mut samples = Vec::new();
         for i in 0..surf.u_knots.len() - 1 {
@@ -50,13 +73,40 @@ impl<const N: usize> SampledSurface<N>
                 }
             }
         }
-        Self { surf, samples }
+        let scale = sample_scale(samples.iter());
+        Self { surf, samples, scale, closed_u, closed_v }
+    }
+
+    /// Whether the surface's opposite edges coincide, in (u, v)
+    fn closure(surf: &NDBSplineSurface<N>) -> (bool, bool) {
+        const K: usize = 7;
+        let lerp = |a: f64, b: f64, i: usize| a + (b - a) * (i as f64) / ((K - 1) as f64);
+        let (u0, u1, v0, v1) = (surf.min_u(), surf.max_u(), surf.min_v(), surf.max_v());
+        let mut scale: f64 = 0.0;
+        let mut gap_u: f64 = 0.0;
+        let mut gap_v: f64 = 0.0;
+        for i in 0..K {
+            let (a, b) = (surf.point(DVec2::new(u0, lerp(v0, v1, i))),
+                          surf.point(DVec2::new(u1, lerp(v0, v1, i))));
+            gap_u = gap_u.max((a - b).norm());
+            let (c, d) = (surf.point(DVec2::new(lerp(u0, u1, i), v0)),
+                          surf.point(DVec2::new(lerp(u0, u1, i), v1)));
+            gap_v = gap_v.max((c - d).norm());
+            for p in [a, b, c, d] {
+                scale = scale.max((p - surf.point(DVec2::new(u0, v0))).norm());
+            }
+        }
+        let tol = 1e-6 * scale.max(1e-12);
+        (gap_u < tol, gap_v < tol)
     }
 
     // Section 6.1 (start middle page 232)
     pub fn uv_from_point_newtons_method(&self, P: DVec3, uv_0: DVec2) -> Option<DVec2> {
-        let eps1 = 0.01; // a Euclidean distance error bound
+        let eps1 = 1e-7 * self.scale; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
+        // Boundary points may sit slightly off the surface (modelling
+        // tolerance); the closest point found is good enough within this.
+        let accept = 1e-3 * self.scale;
 
         // Distance at which the point is simply on the surface.  The cosine
         // test below divides by |S - P|, so it can't be used when that is ~0
@@ -166,11 +216,29 @@ impl<const N: usize> SampledSurface<N>
         }
         // Newton can bounce around a seam without meeting the cosine test;
         // the closest point it visited is still good enough if it is close.
-        if best.0 < eps1 {
+        if best.0 < accept {
             return Some(best.1);
         }
         error!("Could not find UV coordinates");
         None
+    }
+
+    /// Like `uv_from_point`, but also tries starting from `seed` (e.g. the
+    /// previous point along a boundary) and keeps whichever answer actually
+    /// lands closer to `p`.  Starting from the globally nearest sample alone
+    /// can converge onto the wrong part of a strongly curved surface.
+    pub fn uv_from_point_near(&self, p: DVec3, seed: Option<DVec2>) -> Option<DVec2> {
+        let residual = |uv: DVec2| (self.surf.point(uv) - p).norm();
+        let global = self.uv_from_point(p);
+        let seeded = seed.and_then(|s| self.uv_from_point_newtons_method(p, s));
+        match (seeded, global) {
+            (Some(a), Some(b)) => {
+                // Prefer continuity unless the global answer is clearly better
+                let (ra, rb) = (residual(a), residual(b));
+                Some(if ra <= rb * 1.5 + 1e-12 { a } else { b })
+            },
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn uv_from_point(&self, p: DVec3) -> Option<DVec2> {

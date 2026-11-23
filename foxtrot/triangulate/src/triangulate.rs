@@ -399,6 +399,26 @@ fn closed_shell(s: &StepFile, c: ClosedShell, mesh: &mut Mesh, stats: &mut Stats
     stats.num_shells += 1;
 }
 
+/// Drops consecutive points of a closed contour that are within `tol` of
+/// each other, keeping the closing point (a copy of the first) at the end.
+fn merge_close_points(c: Vec<DVec3>, tol: f64) -> Vec<DVec3> {
+    if c.len() < 3 {
+        return c;
+    }
+    let first = c[0];
+    let mut out = vec![first];
+    for &p in &c[1..c.len() - 1] {
+        if (p - out[out.len() - 1]).norm() > tol {
+            out.push(p);
+        }
+    }
+    while out.len() > 1 && (out[out.len() - 1] - first).norm() <= tol {
+        out.pop();
+    }
+    out.push(first);
+    out
+}
+
 /// Triangulates one face so that any failure, including a panic in surface
 /// or edge setup, costs only that face and leaves no partial geometry.
 fn guarded_face(s: &StepFile, face: usize, mesh: &mut Mesh, stats: &mut Stats) {
@@ -436,6 +456,16 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
         .map(|b| face_bound(s, *b))
         .collect::<Result<Vec<_>, _>>()?;
     let hint: Vec<DVec3> = bounds.iter().flatten().cloned().collect();
+
+    // Merge boundary points that are practically the same (CATIA writes
+    // edges ~1e-8 of the part long); a zero-length edge breaks triangulation.
+    let (lo, hi) = hint.iter().fold(
+        (DVec3::repeat(f64::INFINITY), DVec3::repeat(f64::NEG_INFINITY)),
+        |(lo, hi), p| (lo.inf(p), hi.sup(p)));
+    let tol = 1e-6 * (hi - lo).norm();
+    let bounds: Vec<Vec<DVec3>> = bounds.into_iter()
+        .map(|c| merge_close_points(c, tol))
+        .collect();
 
     // Grab the surface, returning early if it's unimplemented
     let mut surf = get_surface(s, face.face_geometry, &hint)?;
@@ -503,7 +533,7 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
     // _fail_ due to these points, so if that happens, we nuke the point (by
     // assigning it to the first point in the list, which causes it to get
     // deduplicated), then retry.
-    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..], &loops)?;
+    let mut pts = surf.lower_verts(&mut mesh.verts[v_start..], &loops, face.same_sense)?;
     let bonus_points = pts.len();
     surf.add_steiner_points(&mut pts, &mut mesh.verts);
     let result = std::panic::catch_unwind(|| {
@@ -511,21 +541,46 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
         // SVG if this panics.  Once we're confident in never panicking, we
         // can remove this.
         let mut pts = pts.clone();
+        let mut dropped_steiner = false;
         loop {
+            // Interior (Steiner) points only refine the mesh.  If the face
+            // can't be triangulated with them (e.g. a grid row lands right on
+            // a boundary curve), drop them all and retry with the boundary
+            // alone: a coarser face beats a missing one.
+            let retry_without_steiner = |pts: &mut Vec<(f64, f64)>, dropped: &mut bool| {
+                if *dropped || pts.len() == bonus_points {
+                    return false;
+                }
+                let first = pts[0];
+                for p in &mut pts[bonus_points..] {
+                    *p = first;
+                }
+                *dropped = true;
+                true
+            };
             let mut t = match cdt::Triangulation::new_with_edges(&pts, &edges) {
-                Err(e) => break Err(e),
+                Err(e) => {
+                    if retry_without_steiner(&mut pts, &mut dropped_steiner) { continue; }
+                    break Err(e)
+                },
                 Ok(t) => t,
             };
-            match t.run() {
-                Ok(()) => break Ok(t),
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.run()));
+            match run {
+                Ok(Ok(())) => break Ok(t),
                 // If triangulation failed due to a Steiner point on a fixed
                 // edge, then reassign that point to pts[0] (so it will be
                 // ignored as a duplicate)
-                Err(cdt::Error::PointOnFixedEdge(p)) if p >= bonus_points => {
+                Ok(Err(cdt::Error::PointOnFixedEdge(p))) if p >= bonus_points => {
                     pts[p] = pts[0];
                     continue;
                 },
-                Err(e) => {
+                Err(panic) => {
+                    if retry_without_steiner(&mut pts, &mut dropped_steiner) { continue; }
+                    std::panic::resume_unwind(panic)
+                },
+                Ok(Err(e)) => {
+                    if retry_without_steiner(&mut pts, &mut dropped_steiner) { continue; }
                     if SAVE_DEBUG_SVGS {
                         let filename = format!("err{}.svg", face.face_geometry.0);
                         t.save_debug_svg(&filename)

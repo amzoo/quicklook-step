@@ -5,6 +5,8 @@ use crate::{abstract_curve::AbstractCurve, nd_curve::NDBSplineCurve};
 pub struct SampledCurve<const N: usize> {
     curve: NDBSplineCurve<N>,
     samples: Vec<(f64, DVec3)>,
+    /// Size of the curve, for scale-independent tolerances
+    scale: f64,
 }
 
 impl<const N: usize> SampledCurve<N>
@@ -28,12 +30,13 @@ impl<const N: usize> SampledCurve<N>
             }
         }
 
-        Self { curve, samples }
+        let scale = crate::sampled_surface::sample_scale(samples.iter());
+        Self { curve, samples, scale }
     }
 
     // Section 6.1 (start middle page 232)
     pub fn u_from_point_newtons_method(&self, P: DVec3, u_0: f64) -> f64 {
-        let eps1 = 0.01; // a Euclidean distance error bound
+        let eps1 = 1e-7 * self.scale; // a Euclidean distance error bound
         let eps2 = 0.01; // a cosine error bound
 
         let mut u_i = u_0;

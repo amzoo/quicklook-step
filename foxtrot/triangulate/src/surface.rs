@@ -262,7 +262,7 @@ impl Surface {
         }
     }
 
-    fn prepare(&mut self, verts: &[Vertex]) {
+    fn prepare(&mut self, verts: &[Vertex], loops: &[Range<usize>], same_sense: bool) {
         match self {
             Surface::Cylinder { mat_i, z_min, z_max, .. } => {
                 *z_min = std::f64::INFINITY;
@@ -278,9 +278,39 @@ impl Surface {
                 }
             },
             Surface::Sphere { mat, mat_i, location, .. } => {
-                let ref_direction = (verts[0].pos - *location).normalize();
-                let d1 = (verts.last().unwrap().pos - *location).normalize();
-                let axis = ref_direction.cross(&d1).normalize();
+                // Centre the projection inside the face, so the far side of
+                // the sphere (which maps to the edge of the projection disc)
+                // is as far from the face as possible.  Only the boundary's
+                // orientation says which side of a loop is the face (a small
+                // circle can bound a cap or everything but the cap), so use
+                // its circulation axis, flipped when the face runs against
+                // the surface normal.
+                let dirs: Vec<DVec3> = verts.iter()
+                    .map(|v| (v.pos - *location).normalize())
+                    .collect();
+                let mean = dirs.iter().sum::<DVec3>() / dirs.len().max(1) as f64;
+                let mut circulation = DVec3::zeros();
+                for l in loops {
+                    for i in l.clone() {
+                        let j = if i + 1 == l.end { l.start } else { i + 1 };
+                        circulation += dirs[i].cross(&dirs[j]);
+                    }
+                }
+                let ref_direction = if circulation.norm() > 1e-9 {
+                    let c = circulation.normalize();
+                    if same_sense { c } else { -c }
+                } else if mean.norm() > 1e-9 {
+                    mean.normalize()
+                } else {
+                    dirs[0]
+                };
+                // Any direction perpendicular to it completes the frame
+                let least = if ref_direction.x.abs() < 0.5 {
+                    DVec3::new(1.0, 0.0, 0.0)
+                } else {
+                    DVec3::new(0.0, 1.0, 0.0)
+                };
+                let axis = ref_direction.cross(&least).normalize();
 
                 *mat = Self::make_rigid_transform(
                         axis, ref_direction, *location);
@@ -306,17 +336,30 @@ impl Surface {
 
     /// Lowers boundary vertices to 2D.  `loops` gives the index range of
     /// each closed boundary loop within `verts`.
-    pub fn lower_verts(&mut self, verts: &mut [Vertex], loops: &[Range<usize>])
+    pub fn lower_verts(&mut self, verts: &mut [Vertex], loops: &[Range<usize>],
+                       same_sense: bool)
         -> Result<Vec<(f64, f64)>, Error>
     {
-        self.prepare(verts);
+        self.prepare(verts, loops, same_sense);
         let mut pts = Vec::with_capacity(verts.len());
+        let mut prev: Option<DVec2> = None;
         for v in verts {
-            // Project to the 2D subspace for triangulation
-            let proj = self.lower(v.pos)?;
+            // Project to the 2D subspace for triangulation.  Spline surfaces
+            // march along the boundary, seeding each point from the last.
+            let proj = match self {
+                Surface::BSpline(s, _) => s.uv_from_point_near(v.pos, prev)
+                    .ok_or(Error::CouldNotLower)?,
+                Surface::NURBS(s, _) => s.uv_from_point_near(v.pos, prev)
+                    .ok_or(Error::CouldNotLower)?,
+                _ => self.lower(v.pos)?,
+            };
+            prev = Some(proj);
             // Update the surface normal
             v.norm = self.normal(v.pos, proj);
             pts.push((proj.x, proj.y));
+        }
+        if let Surface::Cone { .. } = self {
+            Self::nudge_apex(&mut pts);
         }
         if !matches!(self, Surface::BSpline(..) | Surface::NURBS(..)) {
             return Ok(pts);
@@ -347,6 +390,29 @@ impl Surface {
             p.1 *= aspect_ratio;
         }
         Ok(pts)
+    }
+
+    /// A cone's apex lowers to the origin.  When the face's two straight
+    /// edges meet there at 180 degrees (a half cone), the apex sits exactly on
+    /// a straight boundary line and triangulation rejects it, so move it a
+    /// hair toward the inside of the face.
+    fn nudge_apex(pts: &mut [(f64, f64)]) {
+        let size = pts.iter().map(|p| p.0.hypot(p.1)).fold(0.0, f64::max);
+        if size <= 0.0 {
+            return;
+        }
+        let n = pts.len() as f64;
+        let (cx, cy) = pts.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+        let len = cx.hypot(cy);
+        if len <= 0.0 {
+            return;
+        }
+        let step = 1e-3 * size;
+        for p in pts.iter_mut() {
+            if p.0.hypot(p.1) < 1e-9 * size {
+                *p = (cx / len * step, cy / len * step);
+            }
+        }
     }
 
     /// If a boundary loop winds all the way around a closed direction, the
@@ -383,8 +449,8 @@ impl Surface {
             where NDBSplineSurface<N>: AbstractSurface
         {
             let f = &s.surf;
-            (f.closed_in_u().then(|| (f.min_u(), f.max_u() - f.min_u())),
-             f.closed_in_v().then(|| (f.min_v(), f.max_v() - f.min_v())))
+            (s.closed_u.then(|| (f.min_u(), f.max_u() - f.min_u())),
+             s.closed_v.then(|| (f.min_v(), f.max_v() - f.min_v())))
         }
         match self {
             Surface::BSpline(s, _) => periods(s),

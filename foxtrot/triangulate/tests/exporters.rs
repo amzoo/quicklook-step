@@ -319,3 +319,44 @@ fn omitted_axis_defaults_to_z() {
     assert_eq!(stats.num_errors + stats.num_panics, 0);
     assert_close(area(&mesh), 100.0, 1e-6);
 }
+
+/// A sphere of radius 5 at the origin, cut by one circle at height `z` that
+/// runs clockwise seen from above (`.F.`), so the face is everything except
+/// the cap above the circle.
+fn sphere_without_cap(z: f64) -> String {
+    let r = (25.0 - z * z).sqrt();
+    format!("#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=SPHERICAL_SURFACE('',#4,5.);
+#6=CARTESIAN_POINT('',(0.,0.,{z}));
+#7=AXIS2_PLACEMENT_3D('',#6,#2,#3);
+#8=CIRCLE('',#7,{r});
+#9=CARTESIAN_POINT('',({r},0.,{z}));
+#10=VERTEX_POINT('',#9);
+#11=EDGE_CURVE('',#10,#10,#8,.T.);
+#12=ORIENTED_EDGE('',*,*,#11,.F.);
+#13=EDGE_LOOP('',(#12));
+#14=FACE_OUTER_BOUND('',#13,.T.);
+#15=ADVANCED_FACE('',(#14),#5,.T.);
+#16=OPEN_SHELL('',(#15));
+#17=SHELL_BASED_SURFACE_MODEL('',(#16));")
+}
+
+#[test]
+fn sphere_face_larger_than_hemisphere() {
+    // Cap above z = 4 removed: area = 4*pi*r^2 - 2*pi*r*h with h = 1
+    let (mesh, stats) = run(&sphere_without_cap(4.0));
+    assert_eq!(stats.num_errors + stats.num_panics, 0);
+    // 10% still tells the face (282) from the cap (31); the coarse sphere
+    // grid keeps it from being tighter
+    assert_close(area(&mesh), 100.0 * PI - 10.0 * PI, 0.10);
+}
+
+#[test]
+fn hemisphere_bounded_by_great_circle() {
+    let (mesh, stats) = run(&sphere_without_cap(0.0));
+    assert_eq!(stats.num_errors + stats.num_panics, 0);
+    assert_close(area(&mesh), 50.0 * PI, 0.10);
+}
