@@ -328,16 +328,21 @@ pub(crate) fn cartesian_point(s: &StepFile, a: Id<CartesianPoint_>) -> DVec3 {
 
 pub(crate) fn direction(s: &StepFile, a: Direction) -> DVec3 {
     let p = s.entity(a).expect("Could not get cartesian point");
-    DVec3::new(p.direction_ratios[0],
-               p.direction_ratios[1],
-               p.direction_ratios[2])
+    let d = DVec3::new(p.direction_ratios[0],
+                       p.direction_ratios[1],
+                       p.direction_ratios[2]);
+    // STEP directions need not be unit length (some exporters leave a unit
+    // conversion factor in them), so normalize before building frames.
+    if d.norm() > 1e-12 { d.normalize() } else { d }
 }
 
 pub(crate) fn axis2_placement_3d(s: &StepFile, t: Id<Axis2Placement3d_>) -> (DVec3, DVec3, DVec3) {
     let a = s.entity(t).expect("Could not get Axis2Placement3d");
     let location = cartesian_point(s, a.location);
     // TODO: this doesn't necessarily match the behavior of `build_axes`
-    let axis = direction(s, a.axis.expect("Missing axis"));
+    // The axis is optional and defaults to +Z
+    let axis = a.axis.map(|d| direction(s, d))
+        .unwrap_or_else(|| DVec3::new(0.0, 0.0, 1.0));
     let ref_direction = build_ref_direction(axis, a.ref_direction.map(|r| direction(s, r)));
     (location, axis, ref_direction)
 }
@@ -381,10 +386,7 @@ fn shell(s: &StepFile, c: Shell, mesh: &mut Mesh, stats: &mut Stats) {
 fn open_shell(s: &StepFile, c: OpenShell, mesh: &mut Mesh, stats: &mut Stats) {
     let cs = s.entity(c).expect("Could not get OpenShell");
     for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
-            error!("Failed to triangulate face #{}: {}", face.0, err);
-            stats.num_errors += 1;
-        }
+        guarded_face(s, face.0, mesh, stats);
     }
     stats.num_shells += 1;
 }
@@ -392,12 +394,34 @@ fn open_shell(s: &StepFile, c: OpenShell, mesh: &mut Mesh, stats: &mut Stats) {
 fn closed_shell(s: &StepFile, c: ClosedShell, mesh: &mut Mesh, stats: &mut Stats) {
     let cs = s.entity(c).expect("Could not get ClosedShell");
     for face in &cs.cfs_faces {
-        if let Err(err) = advanced_face(s, face.cast(), mesh, stats) {
-            error!("Failed to triangulate face #{}: {}", face.0, err);
-            stats.num_errors += 1;
-        }
+        guarded_face(s, face.0, mesh, stats);
     }
     stats.num_shells += 1;
+}
+
+/// Triangulates one face so that any failure, including a panic in surface
+/// or edge setup, costs only that face and leaves no partial geometry.
+fn guarded_face(s: &StepFile, face: usize, mesh: &mut Mesh, stats: &mut Stats) {
+    let (nv, nt) = (mesh.verts.len(), mesh.triangles.len());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        advanced_face(s, Id::new(face), mesh, stats)));
+    let failed = match result {
+        Ok(Ok(())) => false,
+        Ok(Err(err)) => {
+            error!("Failed to triangulate face #{}: {}", face, err);
+            stats.num_errors += 1;
+            true
+        },
+        Err(_) => {
+            error!("Panic while triangulating face #{}", face);
+            stats.num_panics += 1;
+            true
+        },
+    };
+    if failed {
+        mesh.verts.truncate(nv);
+        mesh.triangles.truncate(nt);
+    }
 }
 
 fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
@@ -606,8 +630,10 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, hint: &[DVec3])
             let control_points_list = control_points_2d(s, &b.control_points_list);
 
             let surf = BSplineSurface::new(
-                b.u_closed.0.unwrap() == false,
-                b.v_closed.0.unwrap() == false,
+                // `.U.` (unknown) counts as open; real closure is detected
+                // from the control points in SampledSurface::new
+                b.u_closed.0 != Some(true),
+                b.v_closed.0 != Some(true),
                 u_knot_vec,
                 v_knot_vec,
                 control_points_list,
@@ -657,8 +683,8 @@ fn get_surface(s: &StepFile, surf: ap214::Surface, hint: &[DVec3])
                 .collect();
 
             let surf = NURBSSurface::new(
-                bspline.u_closed.0.unwrap() == false,
-                bspline.v_closed.0.unwrap() == false,
+                bspline.u_closed.0 != Some(true),
+                bspline.v_closed.0 != Some(true),
                 u_knot_vec,
                 v_knot_vec,
                 control_points_list,

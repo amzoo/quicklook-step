@@ -265,3 +265,57 @@ fn unknown_logical_is_parsed() {
     assert_eq!(stats.num_errors, 0);
     assert_close(area(&mesh), 100.0, 1e-9);
 }
+
+#[test]
+fn unknown_surface_closure_flag_does_not_blank_the_file() {
+    // NX/CATIA write `.U.` for a B-spline surface's u_closed / v_closed.  This
+    // used to panic, which made the whole preview blank.
+    let data = square(0.0, ".F.").replace("#105=PLANE('',#104);",
+        "#170=CARTESIAN_POINT('',(0.,0.,0.));
+#171=CARTESIAN_POINT('',(0.,10.,0.));
+#172=CARTESIAN_POINT('',(10.,0.,0.));
+#173=CARTESIAN_POINT('',(10.,10.,0.));
+#105=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#170,#171),(#172,#173)),.UNSPECIFIED.,.U.,.U.,.U.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);");
+    let data = format!("{}#300=ADVANCED_FACE('',(#161),#105,.T.);
+#301=OPEN_SHELL('',(#300));
+#302=SHELL_BASED_SURFACE_MODEL('',(#301));", data);
+    let (mesh, stats) = run(&data);
+    assert_eq!(stats.num_errors + stats.num_panics, 0);
+    assert_close(area(&mesh), 100.0, 1e-6);
+}
+
+#[test]
+fn non_unit_directions_are_normalized() {
+    // ftc_08 in the NIST set writes directions scaled by 1/25.4.  The hole's
+    // circle placement uses them too, so an unnormalized frame squashes it.
+    let data = square(0.0, ".F.")
+        .replace("#102=DIRECTION('',(0.,0.,1.));", "#102=DIRECTION('',(0.,0.,0.0393700787402));")
+        .replace("#103=DIRECTION('',(1.,0.,0.));", "#103=DIRECTION('',(0.0393700787402,0.,0.));");
+    let data = format!("{}#200=CARTESIAN_POINT('',(5.,5.,0.));
+#201=AXIS2_PLACEMENT_3D('',#200,#102,#103);
+#202=CIRCLE('',#201,2.);
+#203=CARTESIAN_POINT('',(7.,5.,0.));
+#204=VERTEX_POINT('',#203);
+#205=EDGE_CURVE('',#204,#204,#202,.T.);
+#206=ORIENTED_EDGE('',*,*,#205,.F.);
+#207=EDGE_LOOP('',(#206));
+#208=FACE_BOUND('',#207,.T.);
+#300=ADVANCED_FACE('',(#161,#208),#105,.T.);
+#301=OPEN_SHELL('',(#300));
+#302=SHELL_BASED_SURFACE_MODEL('',(#301));", data);
+    let (mesh, stats) = run(&data);
+    assert_eq!(stats.num_errors + stats.num_panics, 0);
+    assert_close(area(&mesh), 100.0 - PI * 4.0, 0.01);
+}
+
+#[test]
+fn omitted_axis_defaults_to_z() {
+    let data = square(0.0, ".F.")
+        .replace("#104=AXIS2_PLACEMENT_3D('',#101,#102,#103);", "#104=AXIS2_PLACEMENT_3D('',#101,$,$);");
+    let data = format!("{}#300=ADVANCED_FACE('',(#161),#105,.T.);
+#301=OPEN_SHELL('',(#300));
+#302=SHELL_BASED_SURFACE_MODEL('',(#301));", data);
+    let (mesh, stats) = run(&data);
+    assert_eq!(stats.num_errors + stats.num_panics, 0);
+    assert_close(area(&mesh), 100.0, 1e-6);
+}
