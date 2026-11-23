@@ -61,7 +61,7 @@ impl Curve {
     }
 
     fn curve_points<const N: usize>(u: DVec3, v: DVec3, curve: &SampledCurve<N>,
-                                    sense: Sense) -> Vec<DVec3>
+                                    sense: Sense, density: usize) -> Vec<DVec3>
         where NDBSplineCurve<N>: AbstractCurve
     {
         let (t_min, t_max) = (curve.min_u(), curve.max_u());
@@ -72,7 +72,9 @@ impl Curve {
         let per_knot = |a: f64, b: f64| {
             let turn = curve.turning(a, b);
             let n = (turn / MAX_SEGMENT_ANGLE).ceil() as usize;
-            (n / curve.spans_between(a, b)).clamp(1, 32)
+            // Round up: truncating here gave segments over the angle limit
+            let spans = curve.spans_between(a, b);
+            ((n * density + spans - 1) / spans).clamp(1, 32 * density)
         };
         let (whole, fwd) = (per_knot(t_min, t_max), per_knot(t_start, t_end));
 
@@ -128,13 +130,16 @@ impl Curve {
         c
     }
 
-    pub fn build(&self, u: DVec3, v: DVec3) -> Vec<DVec3> {
+    /// Samples the edge from `u` to `v`.  `density` multiplies the number of
+    /// points (1 normally; higher to retry a face whose boundary crossed).
+    pub fn build(&self, u: DVec3, v: DVec3, density: usize) -> Vec<DVec3> {
+        let density = density.max(1);
         match self {
             Self::Line => vec![u, v],
             Self::BSplineCurveWithKnots(curve, sense) =>
-                Self::curve_points(u, v, curve, *sense),
+                Self::curve_points(u, v, curve, *sense, density),
             Self::NURBSCurve(curve, sense) =>
-                Self::curve_points(u, v, curve, *sense),
+                Self::curve_points(u, v, curve, *sense, density),
             Self::Polyline(pts) => Self::polyline_points(u, v, pts),
             Self::Ellipse {
                 eplane_from_world, world_from_eplane, closed, dir
@@ -164,7 +169,7 @@ impl Curve {
 
                 // One point per MAX_SEGMENT_ANGLE of arc, plus the ends
                 let count = 4.max(
-                    ((u_ang - v_ang).abs() / MAX_SEGMENT_ANGLE).ceil() as usize + 1);
+                    ((u_ang - v_ang).abs() / MAX_SEGMENT_ANGLE).ceil() as usize * density + 1);
 
                 let mut out_world = vec![u];
                 // Walk around the circle, using the true positions for start
@@ -182,5 +187,31 @@ impl Curve {
                 out_world
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nurbs::{KnotVector, NURBSCurve};
+
+    /// No segment of a sampled full circle may turn by more than the limit
+    #[test]
+    fn spline_circle_segments_stay_within_angle_limit() {
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let pts = [(1., 0., 1.), (1., 1., h), (0., 1., 1.), (-1., 1., h), (-1., 0., 1.),
+                   (-1., -1., h), (0., -1., 1.), (1., -1., h), (1., 0., 1.)];
+        let control = pts.iter().map(|&(x, y, w)| DVec4::new(x * w, y * w, 0.0, w)).collect();
+        let knots = KnotVector::from_multiplicities(2, &[0., 1., 2., 3., 4.], &[3, 2, 2, 2, 3]);
+        let curve = Curve::NURBSCurve(
+            SampledCurve::new(NURBSCurve::new(false, knots, control)),
+            Sense { closed: true, periodic: true, dir: true });
+        let start = DVec3::new(1.0, 0.0, 0.0);
+        let p = curve.build(start, start, 1);
+        let worst = p.windows(2)
+            .map(|w| w[0].normalize().dot(&w[1].normalize()).clamp(-1.0, 1.0).acos())
+            .fold(0.0, f64::max);
+        assert!(worst <= MAX_SEGMENT_ANGLE + 1e-9,
+                "segment turns {} degrees", worst.to_degrees());
     }
 }

@@ -3,6 +3,7 @@ pub mod stats;
 pub mod surface;
 pub mod triangulate;
 pub mod curve;
+pub mod tessellated;
 mod swept;
 
 #[derive(thiserror::Error, Debug, Eq, PartialEq)]
@@ -27,4 +28,7 @@ pub enum Error {
 
     #[error("Self-intersecting NURBS and b-spline curves are not implemented")]
     SelfIntersectingCurve,
+
+    #[error("Could not triangulate the face's boundary")]
+    Triangulation,
 }

@@ -41,6 +41,10 @@ pub enum Surface {
         mat: DMat4,
         mat_i: DMat4,
         angle: f64,
+        /// Height range of the current face along the axis, when the face
+        /// stays clear of the apex (set in `prepare`); such faces are mapped
+        /// onto a ring like cylinders instead of projected flat.
+        band: Option<(f64, f64)>,
     },
     BSpline(SampledSurface<3>, Option<Annulus>),
     NURBS(SampledSurface<4>, Option<Annulus>),
@@ -154,7 +158,7 @@ impl Surface {
     {
         let mat = Self::make_rigid_transform(axis, ref_direction, location);
         let mat_i = mat.try_inverse().ok_or(Error::DegenerateSurface)?;
-        Ok(Surface::Cone { mat, mat_i, angle })
+        Ok(Surface::Cone { mat, mat_i, angle, band: None })
     }
 
     pub fn make_affine_transform(z_world: DVec3, x_world: DVec3, y_world: DVec3, origin_world: DVec3) -> DMat4 {
@@ -192,9 +196,22 @@ impl Surface {
             Surface::Plane { mat_i, .. } => {
                 Ok(glm::vec4_to_vec2(&(mat_i * p_)))
             },
-            Surface::Cone { mat_i, .. } => {
-                let xy = glm::vec4_to_vec2(&(mat_i * p_));
-                Ok(DVec2::new(-xy.x, xy.y))
+            Surface::Cone { mat_i, band, .. } => {
+                let q = mat_i * p_;
+                let xy = DVec2::new(-q.x, q.y);
+                match band {
+                    // Flat projection: right for faces through the apex
+                    None => Ok(xy),
+                    // Ring: angle around the axis, radius 1..2 from height.
+                    // Projected flat, a shallow cone band would squeeze its
+                    // two boundary arcs together (2 degree cone: 0.6% apart).
+                    Some((z0, z1)) => {
+                        let t = if z1 > z0 { (q.z - z0) / (z1 - z0) } else { 0.0 };
+                        let n = xy.norm();
+                        let dir = if n > 0.0 { xy / n } else { DVec2::new(1.0, 0.0) };
+                        Ok(dir * (1.0 + t))
+                    },
+                }
             },
 
             Surface::Cylinder { mat_i, z_min, z_max, .. } => {
@@ -270,6 +287,20 @@ impl Surface {
 
     fn prepare(&mut self, verts: &[Vertex], loops: &[Range<usize>], same_sense: bool) {
         match self {
+            Surface::Cone { mat_i, band, .. } => {
+                let local: Vec<DVec4> = verts.iter()
+                    .map(|v| *mat_i * DVec4::new(v.pos.x, v.pos.y, v.pos.z, 1.0))
+                    .collect();
+                let r_max = local.iter().map(|q| q.xy().norm()).fold(0.0, f64::max);
+                let touches_apex = local.iter().any(|q| q.xy().norm() <= 1e-6 * r_max);
+                *band = if touches_apex || r_max <= 0.0 {
+                    None
+                } else {
+                    let z0 = local.iter().map(|q| q.z).fold(f64::INFINITY, f64::min);
+                    let z1 = local.iter().map(|q| q.z).fold(f64::NEG_INFINITY, f64::max);
+                    Some((z0, z1))
+                };
+            },
             Surface::Cylinder { mat_i, z_min, z_max, .. } => {
                 *z_min = std::f64::INFINITY;
                 *z_max = -std::f64::INFINITY;

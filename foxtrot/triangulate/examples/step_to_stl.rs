@@ -32,7 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded + parsed in {:?}", since_the_epoch);
 
     let start = std::time::SystemTime::now();
-    let tri = triangulate(&entities);
+    let mut tri = triangulate(&entities);
+    if tri.0.triangles.is_empty() {
+        tri.0 = triangulate::tessellated::mesh_from_flat(&flat);
+    }
     let end = std::time::SystemTime::now();
     let since_the_epoch = end.duration_since(start)
         .expect("Time went backwards");

@@ -51,7 +51,13 @@ fn parse_step_file_impl(path: *const c_char) -> *mut FFIMesh {
 
     let flat = StepFile::strip_flatten(&data);
     let step = StepFile::parse(&flat);
-    let (mesh, _stats) = triangulate(&step);
+    let (mut mesh, _stats) = triangulate(&step);
+    // AP242 files may carry the part only as triangles (no B-rep).  Use that
+    // only when there is no B-rep geometry, so files with both aren't drawn
+    // twice.
+    if mesh.triangles.is_empty() {
+        mesh = triangulate::tessellated::mesh_from_flat(&flat);
+    }
 
     if mesh.verts.is_empty() || mesh.triangles.is_empty() {
         return ptr::null_mut();

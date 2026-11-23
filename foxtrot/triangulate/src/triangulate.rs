@@ -422,9 +422,19 @@ fn merge_close_points(c: Vec<DVec3>, tol: f64) -> Vec<DVec3> {
 /// Triangulates one face so that any failure, including a panic in surface
 /// or edge setup, costs only that face and leaves no partial geometry.
 fn guarded_face(s: &StepFile, face: usize, mesh: &mut Mesh, stats: &mut Stats) {
+    stats.num_faces += 1;
     let (nv, nt) = (mesh.verts.len(), mesh.triangles.len());
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-        advanced_face(s, Id::new(face), mesh, stats)));
+    let attempt = |mesh: &mut Mesh, density: usize|
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            advanced_face(s, Id::new(face), mesh, density)));
+    let mut result = attempt(mesh, 1);
+    // Boundary curves that run very close together can cross once sampled;
+    // sampling them more finely usually separates them.
+    if let Ok(Err(Error::Triangulation)) = result {
+        mesh.verts.truncate(nv);
+        mesh.triangles.truncate(nt);
+        result = attempt(mesh, 4);
+    }
     let failed = match result {
         Ok(Ok(())) => false,
         Ok(Err(err)) => {
@@ -445,15 +455,14 @@ fn guarded_face(s: &StepFile, face: usize, mesh: &mut Mesh, stats: &mut Stats) {
 }
 
 fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
-                 stats: &mut Stats) -> Result<(), Error>
+                 density: usize) -> Result<(), Error>
 {
     let face = s.entity(f).expect("Could not get AdvancedFace");
-    stats.num_faces += 1;
 
     // Walk the face's boundary loops first: swept surfaces are infinite in
     // STEP, so they need the boundary to know how far to extend.
     let bounds = face.bounds.iter()
-        .map(|b| face_bound(s, *b))
+        .map(|b| face_bound(s, *b, density))
         .collect::<Result<Vec<_>, _>>()?;
     let hint: Vec<DVec3> = bounds.iter().flatten().cloned().collect();
 
@@ -607,19 +616,19 @@ fn advanced_face(s: &StepFile, f: AdvancedFace, mesh: &mut Mesh,
             }
         },
         Ok(Err(e)) => {
-            error!("Got error while triangulating {}: {:?}",
-                   face.face_geometry.0, e);
-            stats.num_errors += 1;
+            warn!("Triangulation of surface #{} failed: {:?}",
+                  face.face_geometry.0, e);
+            return Err(Error::Triangulation);
         },
         Err(e) => {
-            error!("Got panic while triangulating {}: {:?}",
-                   face.face_geometry.0, e);
+            warn!("Triangulator panicked on surface #{}: {:?}",
+                  face.face_geometry.0, e);
             if SAVE_PANIC_SVGS {
                 let filename = format!("panic{}.svg", face.face_geometry.0);
                 cdt::save_debug_panic(&pts, &edges, &filename)
                     .expect("Could not save debug SVG");
             }
-            stats.num_panics += 1;
+            return Err(Error::Triangulation);
         }
     }
     // Flip normals of new vertices, depending on the same_sense flag
@@ -764,7 +773,7 @@ fn control_points_2d(s: &StepFile, rows: &Vec<Vec<CartesianPoint>>) -> Vec<Vec<D
         .collect()
 }
 
-fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
+fn face_bound(s: &StepFile, b: FaceBound, density: usize) -> Result<Vec<DVec3>, Error> {
     let (bound, orientation) = match &s[b] {
         Entity::FaceBound(b) => (b.bound, b.orientation),
         Entity::FaceOuterBound(b) => (b.bound, b.orientation),
@@ -772,7 +781,7 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
     };
     match &s[bound] {
         Entity::EdgeLoop(e) => {
-            let mut d = edge_loop(s, &e.edge_list)?;
+            let mut d = edge_loop(s, &e.edge_list, density)?;
             if !orientation {
                 d.reverse()
             }
@@ -787,7 +796,7 @@ fn face_bound(s: &StepFile, b: FaceBound) -> Result<Vec<DVec3>, Error> {
     }
 }
 
-fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
+fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge], density: usize)
     -> Result<Vec<DVec3>, Error>
 {
     let mut out = Vec::new();
@@ -798,13 +807,15 @@ fn edge_loop(s: &StepFile, edge_list: &[OrientedEdge])
             out.pop();
         }
         let edge = s.entity(*e).expect("Could not get OrientedEdge");
-        let o = edge_curve(s, edge.edge_element.cast(), edge.orientation)?;
+        let o = edge_curve(s, edge.edge_element.cast(), edge.orientation, density)?;
         out.extend(o.into_iter());
     }
     Ok(out)
 }
 
-fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3>, Error> {
+fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool, density: usize)
+    -> Result<Vec<DVec3>, Error>
+{
     let edge_curve = s.entity(e).expect("Could not get EdgeCurve");
     // An edge we can't model exactly is drawn straight between its vertices,
     // so the face still renders (approximately) instead of vanishing.
@@ -820,7 +831,7 @@ fn edge_curve(s: &StepFile, e: EdgeCurve, orientation: bool) -> Result<Vec<DVec3
     };
     let u = vertex_point(s, start);
     let v = vertex_point(s, end);
-    Ok(curve.build(u, v))
+    Ok(curve.build(u, v, density))
 }
 
 fn curve(s: &StepFile, edge_curve: &ap214::EdgeCurve_,
