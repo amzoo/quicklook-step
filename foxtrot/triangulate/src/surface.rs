@@ -7,8 +7,14 @@ use glm::{DVec2, DVec3, DVec4, DMat4};
 use nurbs::{AbstractSurface, NDBSplineSurface, SampledSurface};
 use crate::{Error, mesh::Vertex};
 
-/// Interior Steiner points per axis on B-spline / NURBS faces
-const NURBS_STEINER_GRID: usize = 32;
+/// Largest angle (radians) that one mesh segment may turn through, along a
+/// boundary curve or across a curved face.  This is the single density knob:
+/// 12 degrees keeps the chord within ~0.55% of the local radius, and since
+/// vertex normals are exact, shading stays smooth; only silhouettes facet.
+pub const MAX_SEGMENT_ANGLE: f64 = 12.0 * std::f64::consts::PI / 180.0;
+
+/// Upper bound on interior grid rows per direction
+const MAX_STEINER_ROWS: usize = 64;
 
 /// Interior rows along the straight direction of a patch that is curved only
 /// one way
@@ -562,81 +568,131 @@ impl Surface {
         (xmin, xmax, ymin, ymax)
     }
 
-    /// Interior grid lines needed along one parameter direction of a spline
-    /// surface: none if that direction is a single straight (degree 1) span.
-    fn steiner_count(knots: &nurbs::KnotVector) -> usize {
-        let spans = (1..knots.len()).filter(|&i| knots[i] > knots[i - 1]).count();
-        if knots.degree() == 1 && spans <= 1 { 0 } else { NURBS_STEINER_GRID }
+    /// Grid rows needed to follow a turn of `angle` radians
+    fn rows_for(angle: f64) -> usize {
+        ((angle / MAX_SEGMENT_ANGLE).ceil() as usize).min(MAX_STEINER_ROWS)
     }
 
+    /// How far the surface normal turns across the parameter box
+    /// [u0, u1] x [v0, v1], along U and along V (radians, worst row/column).
+    fn turning(&self, u0: f64, u1: f64, v0: f64, v1: f64) -> (f64, f64) {
+        const K: usize = 6;
+        let at = |i: usize, j: usize| {
+            let uv = DVec2::new(u0 + (u1 - u0) * i as f64 / K as f64,
+                                v0 + (v1 - v0) * j as f64 / K as f64);
+            let n = self.normal(DVec3::zeros(), uv);
+            if n.iter().all(|x| x.is_finite()) { Some(n) } else { None }
+        };
+        let angle = |a: Option<DVec3>, b: Option<DVec3>| match (a, b) {
+            (Some(a), Some(b)) => a.dot(&b).clamp(-1.0, 1.0).acos(),
+            _ => 0.0,
+        };
+        let (mut tu, mut tv) = (0.0f64, 0.0f64);
+        for j in 0..=K {
+            tu = tu.max((0..K).map(|i| angle(at(i, j), at(i + 1, j))).sum());
+        }
+        for i in 0..=K {
+            tv = tv.max((0..K).map(|j| angle(at(i, j), at(i, j + 1))).sum());
+        }
+        (tu, tv)
+    }
+
+    /// Adds interior points so the mesh follows the surface's curvature.
+    /// The number of rows in each direction is set by how much the surface
+    /// turns across the face (see `MAX_SEGMENT_ANGLE`), so flat faces and
+    /// small fillets stay light and strongly curved free-form faces get dense.
     pub fn add_steiner_points(&self, pts: &mut Vec<(f64, f64)>,
                                      verts: &mut Vec<Vertex>)
     {
-        let (num_u, num_v) = match self {
-            Surface::Sphere { .. }   => (6, 6),
-            Surface::Torus { .. } => (32, 32),
-            // Curved B-spline / NURBS patches need interior points too.  With
-            // only boundary points, a strongly curved patch (e.g. a quarter of
-            // a torus) is triangulated as a flat polygon across its hollow.
-            // A direction that is one straight span needs none, which keeps
-            // flat patches (Rhino writes planes as bilinear B-splines) cheap.
-            Surface::BSpline(s, _) => (Self::steiner_count(&s.surf.u_knots),
-                                    Self::steiner_count(&s.surf.v_knots)),
-            Surface::NURBS(s, _) => (Self::steiner_count(&s.surf.u_knots),
-                                  Self::steiner_count(&s.surf.v_knots)),
-            _ => (0, 0),
-        };
-        // A patch straight in one direction but curved in the other (a hole
-        // wall, a rolled edge) still needs a few rows along the straight
-        // direction, so the triangles follow the curve instead of cutting it.
-        let (num_u, num_v) = match (num_u, num_v) {
-            (0, n) if n > 0 => (STRAIGHT_STEINER_ROWS, n),
-            (n, 0) if n > 0 => (n, STRAIGHT_STEINER_ROWS),
-            other => other,
-        };
-        // A face wrapped around a closed surface was mapped onto a ring, so
-        // its interior points come from a parameter grid mapped the same way.
-        if let Surface::BSpline(_, Some(a)) | Surface::NURBS(_, Some(a)) = self {
-            let (num_a, num_r) = if a.around_u { (num_u, num_v) } else { (num_v, num_u) };
-            for uv in a.grid(num_a.max(STRAIGHT_STEINER_ROWS * 4), num_r) {
-                if let Some(pos) = self.raise(uv) {
-                    pts.push(a.to_plane(uv));
-                    verts.push(Vertex {
-                        pos,
-                        norm: self.normal(pos, uv),
-                        color: DVec3::new(0.0, 0.0, 0.0),
-                    });
-                }
-            }
+        if pts.is_empty() {
             return;
         }
-
-        let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
-        // `lower_verts` stretches V by the control-net aspect ratio for
-        // B-spline surfaces, so undo that before evaluating the surface.
-        let aspect_ratio = match self {
-            Surface::NURBS(surf, _) => surf.surf.aspect_ratio(),
-            Surface::BSpline(surf, _) => surf.surf.aspect_ratio(),
-            _ => 1.0,
-        };
-
-        for x in 0..num_u {
-            let x_frac = (x as f64 + 1.0) / (num_u as f64 + 1.0);
-            let u = x_frac * xmax + (1.0 - x_frac) * xmin;
-            for y in 0..num_v {
-                let y_frac = (y as f64 + 1.0) / (num_v as f64 + 1.0);
-                let v = y_frac * ymax + (1.0 - y_frac) * ymin;
-
-                let uv = DVec2::new(u, v / aspect_ratio);
-                if let Some(pos) = self.raise(uv) {
-                    pts.push((u, v));
-                    verts.push(Vertex {
-                        pos,
-                        norm: self.normal(pos, uv),
-                        color: DVec3::new(0.0, 0.0, 0.0),
-                    });
-                }
+        let push = |pts: &mut Vec<(f64, f64)>, verts: &mut Vec<Vertex>,
+                    plane: (f64, f64), uv: DVec2| {
+            if let Some(pos) = self.raise(uv) {
+                pts.push(plane);
+                verts.push(Vertex {
+                    pos,
+                    norm: self.normal(pos, uv),
+                    color: DVec3::new(0.0, 0.0, 0.0),
+                });
             }
+        };
+        let (xmin, xmax, ymin, ymax) = Self::bbox(&pts);
+        let grid = |n: usize, lo: f64, hi: f64, k: usize|
+            lo + (hi - lo) * (k as f64 + 1.0) / (n as f64 + 1.0);
+
+        match self {
+            // Azimuthal projection: distance from the centre is the angle
+            Surface::Sphere { .. } => {
+                let n = Self::rows_for((xmax - xmin).max(ymax - ymin)).max(2);
+                for x in 0..n {
+                    for y in 0..n {
+                        let uv = DVec2::new(grid(n, xmin, xmax, x), grid(n, ymin, ymax, y));
+                        push(pts, verts, (uv.x, uv.y), uv);
+                    }
+                }
+            },
+            Surface::Torus { .. } => {
+                for x in 0..32 {
+                    for y in 0..32 {
+                        let uv = DVec2::new(grid(32, xmin, xmax, x), grid(32, ymin, ymax, y));
+                        push(pts, verts, (uv.x, uv.y), uv);
+                    }
+                }
+            },
+            Surface::BSpline(_, annulus) | Surface::NURBS(_, annulus) => {
+                // Parameter box covered by the face
+                let aspect_ratio = match self {
+                    Surface::NURBS(surf, _) => surf.surf.aspect_ratio(),
+                    Surface::BSpline(surf, _) => surf.surf.aspect_ratio(),
+                    _ => unreachable!(),
+                };
+                let (u0, u1, v0, v1) = match annulus {
+                    Some(a) if a.around_u => (a.start, a.start + a.period, a.r0, a.r1),
+                    Some(a) => (a.r0, a.r1, a.start, a.start + a.period),
+                    None => (xmin, xmax, ymin / aspect_ratio, ymax / aspect_ratio),
+                };
+                let (tu, tv) = self.turning(u0, u1, v0, v1);
+                let (num_u, num_v) = (Self::rows_for(tu), Self::rows_for(tv));
+                // A patch straight in one direction but curved in the other
+                // (a hole wall, a rolled edge) still needs a few rows along
+                // the straight direction, so triangles follow the curve.
+                let (num_u, num_v) = match (num_u, num_v) {
+                    (0, n) if n > 0 => (STRAIGHT_STEINER_ROWS, n),
+                    (n, 0) if n > 0 => (n, STRAIGHT_STEINER_ROWS),
+                    other => other,
+                };
+                if let Some(a) = annulus {
+                    // Ring mapping: grid in parameters, mapped the same way
+                    let (num_a, num_r) = if a.around_u { (num_u, num_v) } else { (num_v, num_u) };
+                    for uv in a.grid(num_a.max(4), num_r) {
+                        push(pts, verts, a.to_plane(uv), uv);
+                    }
+                } else {
+                    // Keep grid cells at most 2:1 in the lowered plane (which
+                    // approximates 3D distance); long thin cells make the
+                    // triangulation cut across concave regions.
+                    let (eu, ev) = (xmax - xmin, ymax - ymin);
+                    let (num_u, num_v) = if num_u > 0 && num_v > 0 && eu > 0.0 && ev > 0.0 {
+                        let cell = (eu / (num_u + 1) as f64).min(ev / (num_v + 1) as f64);
+                        let fit = |extent: f64, n: usize|
+                            n.max(((extent / (2.0 * cell)).ceil() as usize).saturating_sub(1))
+                             .min(MAX_STEINER_ROWS);
+                        (fit(eu, num_u), fit(ev, num_v))
+                    } else {
+                        (num_u, num_v)
+                    };
+                    for x in 0..num_u {
+                        let u = grid(num_u, xmin, xmax, x);
+                        for y in 0..num_v {
+                            let v = grid(num_v, ymin, ymax, y);
+                            push(pts, verts, (u, v), DVec2::new(u, v / aspect_ratio));
+                        }
+                    }
+                }
+            },
+            _ => (),
         }
     }
 

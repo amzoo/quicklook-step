@@ -349,14 +349,12 @@ fn sphere_face_larger_than_hemisphere() {
     // Cap above z = 4 removed: area = 4*pi*r^2 - 2*pi*r*h with h = 1
     let (mesh, stats) = run(&sphere_without_cap(4.0));
     assert_eq!(stats.num_errors + stats.num_panics, 0);
-    // 10% still tells the face (282) from the cap (31); the coarse sphere
-    // grid keeps it from being tighter
-    assert_close(area(&mesh), 100.0 * PI - 10.0 * PI, 0.10);
+    assert_close(area(&mesh), 100.0 * PI - 10.0 * PI, 0.02);
 }
 
 #[test]
 fn hemisphere_bounded_by_great_circle() {
     let (mesh, stats) = run(&sphere_without_cap(0.0));
     assert_eq!(stats.num_errors + stats.num_panics, 0);
-    assert_close(area(&mesh), 50.0 * PI, 0.10);
+    assert_close(area(&mesh), 50.0 * PI, 0.02);
 }

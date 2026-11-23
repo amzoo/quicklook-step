@@ -2,7 +2,7 @@ use nalgebra_glm as glm;
 use glm::{DVec3, DVec4, DMat4};
 
 use nurbs::{AbstractCurve, NDBSplineCurve, SampledCurve};
-use crate::surface::Surface;
+use crate::surface::{Surface, MAX_SEGMENT_ANGLE};
 
 #[derive(Debug)]
 pub enum Curve {
@@ -64,17 +64,24 @@ impl Curve {
                                     sense: Sense) -> Vec<DVec3>
         where NDBSplineCurve<N>: AbstractCurve
     {
-        const PER_KNOT: usize = 8;
         let (t_min, t_max) = (curve.min_u(), curve.max_u());
         let t_start = curve.u_from_point(u);
         let t_end = curve.u_from_point(v);
+        // Points per knot span, so that no segment turns by more than
+        // MAX_SEGMENT_ANGLE (straight spans need only their end points)
+        let per_knot = |a: f64, b: f64| {
+            let turn = curve.turning(a, b);
+            let n = (turn / MAX_SEGMENT_ANGLE).ceil() as usize;
+            (n / curve.spans_between(a, b)).clamp(1, 32)
+        };
+        let (whole, fwd) = (per_knot(t_min, t_max), per_knot(t_start, t_end));
 
         let mut c = if sense.closed {
             // A closed edge has the same start and end vertex, so it covers
             // the whole curve.  Walk from the vertex to the end of the
             // domain, then from the start of the domain back to the vertex.
-            let mut c = curve.as_polyline(t_start, t_max, PER_KNOT);
-            c.extend(curve.as_polyline(t_min, t_start, PER_KNOT).into_iter().skip(1));
+            let mut c = curve.as_polyline(t_start, t_max, whole);
+            c.extend(curve.as_polyline(t_min, t_start, whole).into_iter().skip(1));
             if !sense.dir {
                 c.reverse();
             }
@@ -82,14 +89,14 @@ impl Curve {
         } else if sense.periodic && (t_end < t_start) == sense.dir {
             // The edge crosses the seam of a closed curve
             let (a, b) = if sense.dir { (t_start, t_end) } else { (t_end, t_start) };
-            let mut c = curve.as_polyline(a, t_max, PER_KNOT);
-            c.extend(curve.as_polyline(t_min, b, PER_KNOT).into_iter().skip(1));
+            let mut c = curve.as_polyline(a, t_max, whole);
+            c.extend(curve.as_polyline(t_min, b, whole).into_iter().skip(1));
             if !sense.dir {
                 c.reverse();
             }
             c
         } else {
-            curve.as_polyline(t_start, t_end, PER_KNOT)
+            curve.as_polyline(t_start, t_end, fwd)
         };
         // Drop repeated points (e.g. where the walk wraps past the seam)
         c.dedup_by(|a, b| (*a - *b).norm() < 1e-9);
@@ -155,10 +162,9 @@ impl Curve {
                     v_ang -= PI2;
                 }
 
-                const N: usize = 64;
+                // One point per MAX_SEGMENT_ANGLE of arc, plus the ends
                 let count = 4.max(
-                    (N as f64 * (u_ang - v_ang).abs() /
-                    (2.0 * std::f64::consts::PI)).round() as usize);
+                    ((u_ang - v_ang).abs() / MAX_SEGMENT_ANGLE).ceil() as usize + 1);
 
                 let mut out_world = vec![u];
                 // Walk around the circle, using the true positions for start

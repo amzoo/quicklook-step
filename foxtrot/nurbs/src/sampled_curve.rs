@@ -85,6 +85,35 @@ impl<const N: usize> SampledCurve<N>
         u_i
     }
 
+    /// Total angle (radians) the tangent turns through between `t0` and
+    /// `t1`, estimated from samples; used to pick how densely to sample.
+    pub fn turning(&self, t0: f64, t1: f64) -> f64 {
+        const K: usize = 24;
+        let (a, b) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
+        let mut total = 0.0;
+        let mut prev: Option<DVec3> = None;
+        for i in 0..=K {
+            let t = a + (b - a) * (i as f64) / (K as f64);
+            let d = self.curve.derivs::<1>(t)[1];
+            if d.norm() < 1e-300 {
+                continue;
+            }
+            let d = d.normalize();
+            if let Some(p) = prev {
+                total += p.dot(&d).clamp(-1.0, 1.0).acos();
+            }
+            prev = Some(d);
+        }
+        total
+    }
+
+    /// Number of distinct knot spans between `t0` and `t1`
+    pub fn spans_between(&self, t0: f64, t1: f64) -> usize {
+        let (a, b) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
+        let k = &self.curve.knots;
+        (1..k.len()).filter(|&i| k[i] > k[i - 1] && k[i] > a && k[i - 1] < b).count().max(1)
+    }
+
     /// Start of the curve's parameter domain
     pub fn min_u(&self) -> f64 {
         self.curve.min_u()
